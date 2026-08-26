@@ -148,13 +148,26 @@ CI 自动完成构建、npm 发布、GitHub Release。
 
 ## 版本历史
 
-- **v1.3.0** — 设置面板进入「DSH 设置 → 插件」section 的 tab 栏（与「可配置」同级）：
-  - 改为 `ctx.slots.inject('settings.plugins.tab', ...)`，id=reminder, order=100, label='🔔 完成提醒'
-  - `settings.section` 保留为兜底（旧 host 仍能找到入口）
-  - jsdom smoke test 验证 tab 注入路径
-- **v1.2.0** — 设置面板进入 DSH 设置弹窗 + 凭证按渠道筛选 + 暗色主题修复
-- **v1.1.0** — 真实 DSH DOM 锚点 + 浮动按钮 + 11 凭证字段全显示
+- **v1.3.1** — 修复设置入口从未出现的根因：插件现在导出 `inject = ['slots']`，
+  cordis Loader 会等 slots 服务就绪才调用 `apply`（对齐 dshmarket 的做法）。
+  之前 apply 跑在服务提供之前，`ctx.slots` 为 undefined，注册被静默跳过。
+  另：槽位组件改为 dshmarket 同款「普通函数组件 + callback ref」，去掉
+  forwardRef/useRef 依赖；新增 `window.__DSH_COMPLETION_REMINDER_DEBUG`
+  诊断对象；`settings.section` order 调整为 45（紧随「插件」「插件市场」）。
+- **v1.3.0** — 设置面板进入「DSH 设置 → 插件」section 的 tab 栏（与「可配置」同级）
+- **v1.2.0** — 凭证按渠道筛选 + 暗色主题修复
+- **v1.1.0** — 真实 DSH DOM 锚点
 - **v1.0.0** — 初始版本（class 名匹配，实际 DSH 上不可用）
+
+### 自查
+
+若升级后仍看不到入口，在浏览器控制台（F12）执行：
+
+```js
+window.__DSH_COMPLETION_REMINDER_DEBUG
+```
+
+正常应显示 `{ hasSlots: true, pluginsTab: 'ok', section: 'ok', … }`。
 
 ## 许可
 

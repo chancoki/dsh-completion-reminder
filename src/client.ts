@@ -23,7 +23,6 @@
  */
 
 import * as React from 'react';
-import { createElement, forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 
 import type {
   AgentRunStatus,
@@ -727,145 +726,130 @@ const PROVIDER_LABELS: Array<[ProviderId, string]> = [
 const PANEL_STYLE_ID = 'dsh-completion-reminder-panel-style';
 
 /**
- * The Host React component. It renders a stable <div> that the
- * vanilla JS portion of the plugin fills in. This way we get free
- * DSH theming (the host div inherits the dialog's CSS variables) and
- * we don't have to bundle React/JSX-runtime.
+ * Where the panel currently lives. Used to avoid re-rendering the panel
+ * when React re-attaches the same host element (inline callback refs are
+ * re-invoked on every render).
  */
-const Host = forwardRef<HTMLDivElement, Record<string, never>>((_props, ref) => {
-  const innerRef = useRef<HTMLDivElement | null>(null);
-  useImperativeHandle(ref, () => innerRef.current as HTMLDivElement);
-  return React.createElement('div', {
-    ref: innerRef,
-    className: 'dsh-reminder-host',
-    'data-reminder-host': '',
-  });
-});
-Host.displayName = 'DSHCompletionReminderHost';
+let lastPanelHostEl: HTMLElement | null = null;
 
 /**
- * Component registered with DSH's `settings.section` slot. Renders a
- * ref-bound div into the dialog; the ref is captured by the parent
- * closure and populated with the actual settings UI.
+ * Mount/unmount the settings panel into a host element.
+ *
+ * This is the callback-ref body shared by every slot component we
+ * register: React calls it with the element on mount (and on every
+ * re-render), and with `null` on unmount.
  */
-function makeSectionComponent(registerHost: (el: HTMLElement) => void) {
-  return function ReminderSection(): React.ReactElement {
-    const localRef = useRef<HTMLDivElement | null>(null);
-    useEffect(() => {
-      if (localRef.current) {
-        registerHost(localRef.current);
-      }
-      return () => {
-        if (localRef.current) {
-          localRef.current.innerHTML = '';
-        }
-      };
-    }, []);
-    return React.createElement(Host, { ref: localRef });
+function mountPanelRef(el: HTMLElement | null): void {
+  if (el) {
+    state.panelHostEl = el;
+    if (lastPanelHostEl !== el) {
+      lastPanelHostEl = el;
+      injectPanelInto(el);
+    }
+    return;
+  }
+  // Unmount: drop our references. React removes the subtree itself.
+  if (state.panelHostEl) {
+    state.panelHostEl.innerHTML = '';
+    state.panelHostEl = null;
+  }
+  lastPanelHostEl = null;
+}
+
+/**
+ * Build a slot component in the style dshmarket uses: a plain function
+ * component that renders one div whose callback ref hands the element to
+ * the vanilla-DOM panel renderer. No hooks, no forwardRef — the least
+ * surface area production React can't break.
+ */
+function makeSlotComponent(): () => React.ReactElement {
+  return function ReminderSlotHost() {
+    return React.createElement('div', {
+      className: 'dsh-reminder-host',
+      'data-reminder-host': '',
+      ref: mountPanelRef,
+    });
   };
 }
 
 /**
+ * Cordis service dependencies. The loader waits for these services
+ * before invoking `apply`, so `ctx.slots` is guaranteed to exist here.
+ *
+ * This mirrors dshmarket (`inject = ['slots', 'locale', 'theme']`)
+ * — without this declaration apply() can run before the slots service is
+ * provided and the settings entry silently never appears.
+ */
+const pluginInject: string[] = ['slots'];
+
+/**
+ * Plugin display name for the cordis Loader.
+ */
+const pluginName = 'dsh-completion-reminder';
+
+/**
  * Plugin entry point invoked by the DSH Cordis Loader.
  *
- * In DSH v1.x the host invokes the plugin's exported `apply(ctx, opts)`
- * after the module system has been bootstrapped. We use the context
- * to register a settings section.
+ * Registers two entries (both via the declaration-waiting `slots.inject`,
+ * exactly like dshmarket does):
+ *   1. `settings.plugins.tab` id=reminder — a "🔔 完成提醒" tab inside the
+ *      Plugins section, next to the built-in 可配置 tab.
+ *   2. `settings.section`    id=reminder — a top-level nav section, so the
+ *      configuration is also reachable from the dialog's left navigation.
  */
 function apply(ctx: any, opts?: CompletionReminderOptions): void {
   configure(opts);
   activate();
 
-  // Register the settings entry point.
-  //
-  // The user finds this under "DSH 设置 → 插件 → 完成提醒" — a sibling
-  // tab to the existing "可配置" (configurable) tab. We register:
-  //   1. `settings.plugins.tab` — a new tab inside the Plugins section
-  //   2. `settings.section`      — fallback top-level section in case
-  //      the host is too old to expose the plugins tab slot
-  // The tab registration is the primary one and shows up in the right
-  // place; the section is registered too so the user can still find
-  // the configuration if the host has a non-standard Plugins UI.
+  const diag: Record<string, unknown> = { ts: Date.now(), hasSlots: false };
+  try { (globalThis as any).__DSH_COMPLETION_REMINDER_DEBUG = diag; } catch { /* noop */ }
+
+  if (!ctx || !ctx.slots) {
+    diag.hasSlots = false;
+    diag.error = 'ctx.slots is undefined even though inject:["slots"] was declared';
+    try { console.warn('[dsh-completion-reminder]', diag.error); } catch { /* noop */ }
+    return;
+  }
+  diag.hasSlots = true;
+
+  const slots = ctx.slots;
+
+  // ──── primary: a tab inside the Plugins section ────────────────────────
   try {
-    if (ctx && ctx.slots) {
-      const slots = ctx.slots;
-      const hostRef = { current: null as HTMLElement | null };
-
-      // ──── primary: a tab inside the Plugins section ────────────────
-      // DSH v1.2+ uses `settings.plugins.tab` to render tab buttons in
-      // the Plugins section. The component factory is invoked with DI
-      // props; we accept them and ignore everything except the empty
-      // `renderSlot`, since our body is a vanilla-DOM host.
-      try {
-        slots.inject('settings.plugins.tab', () => {
-          return slots.register(
-            {
-              name: 'settings.plugins.tab',
-              id: 'reminder',
-              order: 100,
-              label: () => '🔔 完成提醒',
-              locale: '@dsh-completion-reminder',
-              inject: () => ({}),
-            },
-            function ReminderPluginsTab() {
-              const localRef = useRef<HTMLDivElement | null>(null);
-              useEffect(() => {
-                if (localRef.current) {
-                  hostRef.current = localRef.current;
-                  injectPanelInto(localRef.current);
-                }
-                return () => {
-                  if (localRef.current) localRef.current.innerHTML = '';
-                };
-              }, []);
-              return React.createElement(Host, { ref: localRef });
-            },
-          );
-        });
-      } catch (err) {
-        try { console.warn('[dsh-completion-reminder] settings.plugins.tab registration failed:', err); } catch { /* noop */ }
-      }
-
-      // ──── fallback: top-level section ───────────────────────────────
-      // Older hosts that don't know about the plugins-tab slot will
-      // accept a top-level section registration so the user can still
-      // find the configuration.
-      try {
-        slots.inject('settings.section', () => {
-          const sectionFactory = makeSectionComponent((el) => {
-            hostRef.current = el;
-            injectPanelInto(el);
-          });
-          return slots.register(
-            {
-              name: 'settings.section',
-              id: 'reminder',
-              order: 50,
-              label: () => '🔔 提醒',
-              locale: '@dsh-completion-reminder',
-              inject: () => ({}),
-            },
-            sectionFactory,
-          );
-        });
-      } catch (err) {
-        try { console.warn('[dsh-completion-reminder] settings.section registration failed:', err); } catch { /* noop */ }
-      }
-
-      // If neither slot was registered, the host is too old. The
-      // detection still works, but the user has nowhere to configure;
-      // surface a hint.
-      if (!hostRef.current) {
-        // Defer: hostRef gets populated on tab/section mount, but
-        // that happens after DSH opens the dialog. Show a hint now.
-        showFirstRunHint('DSH 主机不支持 settings.plugins.tab 槽位。');
-      }
-    } else {
-      showFirstRunHint();
-    }
+    slots.inject('settings.plugins.tab', () => slots.register(
+      {
+        name: 'settings.plugins.tab',
+        id: 'reminder',
+        order: 100,
+        label: () => '🔔 完成提醒',
+        locale: '@dsh-completion-reminder',
+        inject: () => ({}),
+      },
+      makeSlotComponent(),
+    ));
+    diag.pluginsTab = 'ok';
   } catch (err) {
-    try { console.warn('[dsh-completion-reminder] failed to register settings UI:', err); } catch { /* noop */ }
-    showFirstRunHint();
+    diag.pluginsTab = String(err);
+    try { console.warn('[dsh-completion-reminder] settings.plugins.tab registration failed:', err); } catch { /* noop */ }
+  }
+
+  // ──── secondary: a top-level section in the dialog's left nav ─────────
+  try {
+    slots.inject('settings.section', () => slots.register(
+      {
+        name: 'settings.section',
+        id: 'reminder',
+        order: 45,
+        label: () => '🔔 完成提醒',
+        locale: '@dsh-completion-reminder',
+        inject: () => ({}),
+      },
+      makeSlotComponent(),
+    ));
+    diag.section = 'ok';
+  } catch (err) {
+    diag.section = String(err);
+    try { console.warn('[dsh-completion-reminder] settings.section registration failed:', err); } catch { /* noop */ }
   }
 }
 
@@ -1338,4 +1322,16 @@ function injectPanelStyles(): void {
   document.head.appendChild(style);
 }
 
-export { configure, activate, deactivate, apply, requestBrowserPermission, DEFAULT_OPTIONS, renderPanelInto }
+// The cordis Loader reads `inject` (service waits) and `name` (entry
+// display name) off the module exports — same pattern as dshmarket.
+export {
+  configure,
+  activate,
+  deactivate,
+  apply,
+  requestBrowserPermission,
+  DEFAULT_OPTIONS,
+  renderPanelInto,
+  pluginInject as inject,
+  pluginName as name,
+}
