@@ -60,14 +60,15 @@ dsh web
 | 问题 | 原因 | 解决方法 |
 |------|------|----------|
 | 安装报 `ERR_PNPM_ADDING_TO_ROOT` | profile 是 pnpm workspace root | 加 `-w` 标志重新执行 |
-| 找不到「🔔 完成提醒」tab | 装的是 < v1.3.0 | `dsh plugin --profile web update dsh-completion-reminder && dsh web` |
-| 「插件」section 里只有「可配置」 | DSH 主机 < v1.2 | 升级 DSH 主机；或翻 v1.2 之前的版本 |
-| 凭证区看不到字段 | 切到对应渠道才会出现 | 在下拉里选 Telegram / Bark / 其他 |
-| 浏览器没弹权限询问 | 之前已「阻止」该网站 | 浏览器地址栏左侧锁形图标 → 通知 → 允许 |
+| 找不到「完成提醒」tab | 装的是 < v1.3.1 | `dsh plugin --profile web update dsh-completion-reminder && dsh web` |
+| 「插件」section 里只有「可配置」 | DSH 主机 < v1.2 | 升级 DSH 主机 |
+| 凭证区看不到字段 | 切到对应渠道才会出现 | 在单选组里选 Telegram / Bark / 其他 |
+| 浏览器通知不弹 | ① 权限未授予 ② 权限被拒 ③ 系统勿扰/应用通知关闭 | 面板选「浏览器通知」→ 点「请求权限」；若已拒绝，地址栏左侧锁形图标 → 通知 → 允许；再查系统设置 |
+| 开着 DSH 页面就收不到浏览器通知 | 「前台静默」开着（可见且聚焦时不通知） | 关掉该选项，或切到别的标签页/窗口等通知 |
 | Telegram 报 401/400 | `telegramBotToken` / `telegramChatId` 配错 | 用 `@BotFather` 重新获取 token；用 `getUpdates` 找 chat id |
 | 测试按钮提示「Telegram provider requires…」 | 凭证未填 | 凭证区填入对应字段 |
 | 通知频率太高 | 多个 agent 接连完成 | 调大「冷却（ms）」，默认 5000 |
-| 切回浏览器通知 | 想撤销 Telegram 配置 | 面板顶部下拉切回 `浏览器通知` |
+| 切回浏览器通知 | 想撤销 Telegram 配置 | 单选组里点回「浏览器通知」 |
 | 完全停用 | — | `DSHCompletionReminder.deactivate()` |
 | 重置所有配置 | — | 设置面板里点「重置」按钮 |
 

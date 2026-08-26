@@ -113,17 +113,13 @@ function activate(): void {
   if (state.isActive) return;
   state.isActive = true;
 
-  if (
-    config.provider === 'browser' &&
-    config.autoRequestPermission &&
-    state.permission === 'default'
-  ) {
-    void requestBrowserPermission();
-  }
+  // NOTE: we intentionally do NOT call Notification.requestPermission()
+  // here. Browsers ignore permission prompts outside a user gesture, and
+  // the failed call poisons our cached permission state. Permission is
+  // requested from the settings panel's 「请求权限」 button instead.
 
   startObserver();
   bindVisibilityEvents();
-  // Don't auto-show a hint — the user now finds us via DSH Settings.
 }
 
 function deactivate(): void {
@@ -436,21 +432,27 @@ async function dispatch(payload: NotificationPayload): Promise<void> {
 }
 
 async function deliverBrowser(payload: NotificationPayload): Promise<void> {
-  if (state.permission === 'unsupported') {
-    showInPageToast(payload);
+  // Read LIVE permission every time — the cached state.permission can go
+  // stale (user can grant/deny from the browser's site settings at any
+  // moment, and boot-time non-gesture requests silently fail).
+  const live: NotificationPermission | 'unsupported' =
+    typeof window !== 'undefined' && 'Notification' in window
+      ? Notification.permission
+      : 'unsupported';
+  state.permission = live;
+
+  if (live === 'unsupported') {
+    showInPageToast(payload, '此浏览器不支持通知 API，已改为页面内提示。');
     return;
   }
-  if (state.permission !== 'granted') {
-    if (config.autoRequestPermission) {
-      const next = await requestBrowserPermission();
-      if (next !== 'granted') {
-        showInPageToast(payload, '未授予通知权限，已改为页面内提示。');
-        return;
-      }
-    } else {
-      showInPageToast(payload, '未授予通知权限，已改为页面内提示。');
-      return;
-    }
+  if (live !== 'granted') {
+    showInPageToast(
+      payload,
+      live === 'denied'
+        ? '通知权限已被拒绝。请在浏览器地址栏左侧的站点设置里恢复，或改用其他通知渠道。'
+        : '尚未授予通知权限：打开 设置 → 完成提醒，点击「请求权限」。本次先以页面内提示代替。',
+    );
+    return;
   }
   try {
     const n = new Notification(payload.title, {
@@ -469,7 +471,7 @@ async function deliverBrowser(payload: NotificationPayload): Promise<void> {
       n.close();
     };
   } catch (err) {
-    showInPageToast(payload, '系统通知失败，已改为页面内提示。');
+    showInPageToast(payload, '系统通知创建失败（检查系统勿扰/通知设置），已改为页面内提示。');
     config.onError(toError(err), 'browser');
   }
 }
@@ -821,7 +823,7 @@ function apply(ctx: any, opts?: CompletionReminderOptions): void {
         name: 'settings.plugins.tab',
         id: 'reminder',
         order: 100,
-        label: () => '🔔 完成提醒',
+        label: () => '完成提醒',
         locale: '@dsh-completion-reminder',
         inject: () => ({}),
       },
@@ -840,7 +842,7 @@ function apply(ctx: any, opts?: CompletionReminderOptions): void {
         name: 'settings.section',
         id: 'reminder',
         order: 45,
-        label: () => '🔔 完成提醒',
+        label: () => '完成提醒',
         locale: '@dsh-completion-reminder',
         inject: () => ({}),
       },
@@ -953,13 +955,22 @@ function rerenderPanel(): void {
 
 function renderPanelInto(host: HTMLElement): void {
   injectPanelStyles();
+  state.permission = detectPermission();
   host.innerHTML = buildPanelHtml();
   wirePanelEvents(host);
 }
 
 function buildPanelHtml(): string {
-  const providerOptions = PROVIDER_LABELS
-    .map(([id, label]) => `<option value="${id}" ${config.provider === id ? 'selected' : ''}>${escapeHtml(label)}</option>`)
+  // Provider picker: a radio group instead of a <select>. Native select
+  // popups are rendered by the UA and can end up white-on-white inside
+  // the themed dialog; radios style fully via CSS variables.
+  const providerRadios = PROVIDER_LABELS
+    .map(([id, label]) => `
+      <label class="dsh-reminder-radio">
+        <input type="radio" name="dsh-reminder-provider" data-reminder-input="provider" value="${id}" ${config.provider === id ? 'checked' : ''} />
+        <span>${escapeHtml(label)}</span>
+      </label>
+    `)
     .join('');
 
   const p = config.providers;
@@ -986,10 +997,8 @@ function buildPanelHtml(): string {
       </header>
 
       <section class="dsh-reminder-panel-section">
-        <label class="dsh-reminder-panel-field">
-          <span class="dsh-reminder-panel-label">通知渠道</span>
-          <select data-reminder-input="provider">${providerOptions}</select>
-        </label>
+        <header class="dsh-reminder-panel-section-title">通知渠道</header>
+        <div class="dsh-reminder-radio-group" data-reminder-provider-group>${providerRadios}</div>
         <p class="dsh-reminder-panel-hint">${escapeHtml(desc)}</p>
       </section>
 
@@ -1014,11 +1023,7 @@ function buildPanelHtml(): string {
         </label>
         <label class="dsh-reminder-panel-row">
           <input type="checkbox" data-reminder-input="suppressWhenFocused" ${config.suppressWhenFocused ? 'checked' : ''} />
-          <span>DSH 标签页可见时静默（推荐）</span>
-        </label>
-        <label class="dsh-reminder-panel-row">
-          <input type="checkbox" data-reminder-input="autoRequestPermission" ${config.autoRequestPermission ? 'checked' : ''} />
-          <span>自动请求浏览器通知权限</span>
+          <span>前台静默 — DSH 标签页可见且聚焦时不通知（后台跑 agent 想被提醒就关掉这个）</span>
         </label>
         <label class="dsh-reminder-panel-field">
           <span class="dsh-reminder-panel-label">冷却（ms）— 防止连续完成时刷屏</span>
@@ -1026,8 +1031,8 @@ function buildPanelHtml(): string {
         </label>
       </section>
 
-      <section class="dsh-reminder-panel-section dsh-reminder-panel-perm">
-        <span>当前权限：<strong data-reminder-perm>${permissionLabel(state.permission)}</strong></span>
+      <section class="dsh-reminder-panel-section dsh-reminder-panel-perm" data-reminder-perm-row ${config.provider === 'browser' ? '' : 'hidden'}>
+        <span>通知权限：<strong data-reminder-perm>${permissionLabel(state.permission)}</strong></span>
         <button type="button" data-reminder-action="request-permission">请求权限</button>
       </section>
 
@@ -1048,17 +1053,21 @@ function wirePanelEvents(host: HTMLElement): void {
   root.addEventListener('change', (ev) => {
     const target = ev.target as HTMLElement | null;
     if (!target) return;
-    if (target instanceof HTMLSelectElement) {
-      const name = target.dataset.reminderInput;
-      if (name === 'provider') {
-        config.provider = target.value as ProviderId;
-        savePersisted();
-        // Re-render so the credentials section updates to the new channel.
-        renderPanelInto(host);
-      }
-    } else if (target instanceof HTMLInputElement) {
+    if (target instanceof HTMLInputElement) {
       const name = target.dataset.reminderInput;
       if (!name) return;
+
+      // Provider radios swap the credentials section, so they get their
+      // own branch before the generic boolean/number parsing below.
+      if (name === 'provider') {
+        if (target.type !== 'radio' || !target.checked) return;
+        config.provider = target.value as ProviderId;
+        savePersisted();
+        // Re-render so credentials + permission row match the channel.
+        renderPanelInto(host);
+        return;
+      }
+
       const value = target.type === 'checkbox' ? target.checked
         : target.type === 'number' ? Number(target.value) || 0
         : target.value;
@@ -1161,11 +1170,10 @@ function injectPanelStyles(): void {
   if (document.getElementById(PANEL_STYLE_ID)) return;
   const style = document.createElement('style');
   style.id = PANEL_STYLE_ID;
-  // The host's parent (DSH settings dialog) sets `color-scheme: dark`
-  // for the dark theme, so we explicitly hint the dark UA scheme on
-  // selects + add explicit colors that work in both themes.  Native
-  // form controls otherwise default to UA colors (white-on-white in
-  // dark mode).
+  // All controls use explicit colors from DSH CSS variables plus
+  // `color-scheme: light dark` so UA-rendered bits (radio/checkbox
+  // glyphs) follow the dialog theme. There are no native <select>
+  // popups anywhere — those were the white-on-white offenders.
   style.textContent = `
 .dsh-reminder-host { color: inherit; }
 .dsh-reminder-host,
@@ -1211,8 +1219,7 @@ function injectPanelStyles(): void {
   font-size: 12px;
 }
 .dsh-reminder-panel-field input[type="text"],
-.dsh-reminder-panel-field input[type="number"],
-.dsh-reminder-panel-field select {
+.dsh-reminder-panel-field input[type="number"] {
   color-scheme: light dark;
   width: 100%;
   background: transparent;
@@ -1224,23 +1231,36 @@ function injectPanelStyles(): void {
   font-family: inherit;
   outline: none;
   transition: border-color .15s, box-shadow .15s;
-  -webkit-appearance: none;
-  appearance: none;
-}
-.dsh-reminder-panel-field select {
-  /* Provide a small caret since we stripped the native chrome. */
-  background-image: linear-gradient(45deg, transparent 50%, ${DSH_CSS_VARS.labelSecondary} 50%),
-                    linear-gradient(135deg, ${DSH_CSS_VARS.labelSecondary} 50%, transparent 50%);
-  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
-  padding-right: 26px;
 }
 .dsh-reminder-panel-field input[type="text"]:focus,
-.dsh-reminder-panel-field input[type="number"]:focus,
-.dsh-reminder-panel-field select:focus {
+.dsh-reminder-panel-field input[type="number"]:focus {
   border-color: ${DSH_CSS_VARS.stateBusinessPrimary};
   box-shadow: 0 0 0 2px color-mix(in srgb, ${DSH_CSS_VARS.stateBusinessPrimary} 25%, transparent);
+}
+
+/* Provider picker — radio group (no native popup, theme-safe). */
+.dsh-reminder-radio-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px 12px;
+}
+.dsh-reminder-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 2px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  color: ${DSH_CSS_VARS.labelPrimary};
+  font-size: 13px;
+}
+.dsh-reminder-radio:hover { background: ${DSH_CSS_VARS.borderL1}; }
+.dsh-reminder-radio input[type="radio"] {
+  accent-color: ${DSH_CSS_VARS.buttonInfoFill};
+  color-scheme: light dark;
+  margin: 0;
+  flex: none;
 }
 
 .dsh-reminder-panel-row {
@@ -1252,6 +1272,7 @@ function injectPanelStyles(): void {
 }
 .dsh-reminder-panel-row > input[type="checkbox"] {
   accent-color: ${DSH_CSS_VARS.buttonInfoFill};
+  color-scheme: light dark;
 }
 
 .dsh-reminder-panel-hint {
