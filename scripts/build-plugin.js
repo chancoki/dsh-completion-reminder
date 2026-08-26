@@ -94,11 +94,80 @@ const DSH_CSS_VARS = {
 };
 `;
 
-// Transform the compiled ESM: replace imports with var declarations
-// and replace exports with module.exports assignments.
-let factoryCode = compiledCode
-  .replace(/^import\s+.*?from\s+['"][^'"]+['"]\s*;?\s*$/gm, '')
-  .replace(/^export\s+\{([^}]+)\}\s*;?\s*$/m, (_, exportsList) => {
+// Transform the compiled ESM.
+//
+// Rules:
+//   1. `import * as X from "react"`        -> `var X = require("react");`
+//      `import { a, b as c } from "react"` -> `var { a, b: c } = require("react");`
+//      `import X from "react"`             -> `var X = require("react");`
+//      `import "./types.js"`               -> removed (types are inlined above)
+//      `import type ...`                   -> removed
+//      `import "react/jsx-runtime"`        -> no-op (`react/jsx-runtime` is
+//         bundled as a side-effect import by tsc; we don't use it because
+//         the source code uses React.createElement directly)
+//   2. `export { a, b as c }`              -> `exports.a = a; exports.c = b;`
+//   3. `export function/const/... X`       -> drop the `export` keyword
+//   4. `export default`                     -> drop the keyword
+let factoryCode = compiledCode;
+
+// (1a) Side-effect-only imports: drop them.
+factoryCode = factoryCode.replace(
+  /^import\s+['"][^'"]+['"]\s*;?\s*$/gm,
+  '',
+);
+
+// (1b) Default + named imports from "react" or "react/jsx-runtime":
+// rewrite to `var X = require("…")` so DSH's runtime module table can
+// resolve them. tsc compiles `import * as React from "react"` to
+// `import * as React from "react";` which we capture with the
+// namespace pattern below.
+factoryCode = factoryCode.replace(
+  /^import\s+\*\s+as\s+(\w+)\s+from\s+['"]([^'"]+)['"]\s*;?\s*$/gm,
+  (_m, name, spec) => `var ${name} = require(${JSON.stringify(spec)});`,
+);
+factoryCode = factoryCode.replace(
+  /^import\s+(\w+)\s+from\s+['"]([^'"]+)['"]\s*;?\s*$/gm,
+  (_m, name, spec) => `var ${name} = require(${JSON.stringify(spec)});`,
+);
+factoryCode = factoryCode.replace(
+  /^import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]\s*;?\s*$/gm,
+  (_m, names, spec) => {
+    const parts = names.split(',').map((s) => s.trim()).filter(Boolean);
+    const bindings = parts.map((p) => {
+      const m = p.match(/^(\w+)(?:\s+as\s+(\w+))?$/);
+      if (!m) return p;
+      return m[2] ? `${m[1]}: ${m[2]}` : m[1];
+    });
+    return `var { ${bindings.join(', ')} } = require(${JSON.stringify(spec)});`;
+  },
+);
+
+// (1c) Anything left over (e.g. local relative imports) — drop.
+// Specifically, `import {...} from './types.js'` and the resulting
+// `var {...} = require("./types.js")` need to be removed because
+// the wrapper above inlines the types module.
+factoryCode = factoryCode.replace(
+  /^import\s+.*?from\s+['"]\.\/types\.js['"]\s*;?\s*$/gm,
+  '',
+);
+factoryCode = factoryCode.replace(
+  /^var\s+\{[^}]*\}\s*=\s*require\(\s*['"]\.\/types\.js['"]\s*\)\s*;?\s*$/gm,
+  '',
+);
+
+// (1d) Any other leftover imports — drop.
+factoryCode = factoryCode.replace(
+  /^import\s+.*?from\s+['"][^'"]+['"]\s*;?\s*$/gm,
+  '',
+);
+
+// (1e) Pure type imports — drop.
+factoryCode = factoryCode.replace(/^import\s+type\s+.*$/gm, '');
+
+// (2-4) Exports
+factoryCode = factoryCode.replace(
+  /^export\s+\{([^}]+)\}\s*;?\s*$/m,
+  (_, exportsList) => {
     const exports = exportsList.split(',').map((s) => s.trim()).filter(Boolean);
     return exports.map((e) => {
       const parts = e.split(/\s+as\s+/);
@@ -107,10 +176,13 @@ let factoryCode = compiledCode
       }
       return `exports.${parts[0].trim()} = ${parts[0].trim()};`;
     }).join('\n');
-  })
-  .replace(/^export\s+(function|const|class|let|var|interface|type)\s+/gm, '$1 ')
-  .replace(/^export\s+default\s+/gm, '')
-  .replace(/^import\s+type\s+.*$/gm, '');
+  },
+);
+factoryCode = factoryCode.replace(
+  /^export\s+(function|const|class|let|var|interface|type)\s+/gm,
+  '$1 ',
+);
+factoryCode = factoryCode.replace(/^export\s+default\s+/gm, '');
 
 factoryCode = factoryCode
   .replace(/\n{3,}/g, '\n\n')

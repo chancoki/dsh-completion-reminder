@@ -1,7 +1,7 @@
 {
   "name": "dsh-completion-reminder",
-  "version": "1.1.0",
-  "description": "DSH client plugin — notify the user when an agent finishes. Detects send↔stop transitions on the real DSH composer, ships a floating settings panel for 9 notification channels, persists to localStorage.",
+  "version": "1.2.0",
+  "description": "DSH client plugin — notify the user when an agent finishes. Integrates into DSH's own Settings dialog as a '🔔 提醒' section; filtered credential fields per channel; dark-theme safe.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -49,6 +49,7 @@
   "author": "chancoki <chhj727@163.com>",
   "license": "MIT",
   "devDependencies": {
+    "jsdom": "^27.0.1",
     "typescript": "^5.0.0"
   },
   "files": [
