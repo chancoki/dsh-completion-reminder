@@ -355,6 +355,28 @@ function bindVisibilityEvents(): void {
   const onFocus = () => { /* noop */ };
   window.addEventListener('focus', onFocus);
   state.unbinder.push(() => window.removeEventListener('focus', onFocus));
+  // Keep multiple DSH tabs of the same origin in sync: a settings change
+  // in tab B re-loads config in tab A.
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === STORAGE_KEY || e.key === null) configure();
+  };
+  window.addEventListener('storage', onStorage);
+  state.unbinder.push(() => window.removeEventListener('storage', onStorage));
+}
+
+/**
+ * Probe localStorage availability so the panel can warn when settings
+ * cannot possibly persist (private mode, disabled storage, ...).
+ */
+function storageStatus(): { ok: boolean; detail: string } {
+  try {
+    const k = `${STORAGE_KEY}:probe`;
+    localStorage.setItem(k, '1');
+    localStorage.removeItem(k);
+    return { ok: true, detail: typeof location !== 'undefined' ? location.origin : '' };
+  } catch {
+    return { ok: false, detail: 'localStorage 不可用（无痕模式或已禁用站点数据），设置将无法保存' };
+  }
 }
 
 function pageIsFocused(): boolean {
@@ -399,7 +421,11 @@ async function completeRun(status: AgentRunStatus, durationMs: number): Promise<
     await dispatch(payload);
     config.onNotify(payload, config.provider);
   } catch (err) {
-    config.onError(toError(err), config.provider);
+    const e = toError(err);
+    config.onError(e, config.provider);
+    // Surface delivery failures visibly — a silent catch here is exactly
+    // how "配置了却不提醒" mysteries happen.
+    showInPageToast(payload, `渠道发送失败：${e.message}`);
   }
 }
 
@@ -420,6 +446,9 @@ async function dispatch(payload: NotificationPayload): Promise<void> {
     case 'bark':      return deliverBark(payload);
     case 'pushover':  return deliverPushover(payload);
     case 'serverchan':return deliverServerChan(payload);
+    case 'dingtalk':  return deliverDingTalk(payload);
+    case 'feishu':    return deliverFeishu(payload);
+    case 'wecom':     return deliverWecom(payload);
     case 'discord':   return deliverDiscord(payload);
     case 'slack':     return deliverSlack(payload);
     case 'webhook':   return deliverWebhook(payload);
@@ -635,6 +664,99 @@ async function deliverServerChan(payload: NotificationPayload): Promise<void> {
   });
 }
 
+// ──── 国内渠道：钉钉 / 飞书 / 企业微信 ─────────────────────────────────────
+//
+// 三家的机器人 webhook 都不支持 CORS 预检所需的 OPTIONS 应答，因此统一用
+// 「text/plain 简单请求 + JSON 字符串体」发送（三家服务端都按 JSON 解析原始
+// body）。这是浏览器端调用群机器人的通行做法；响应若因 CORS 不可读，只要
+// fetch 未 reject 即视为投递成功。
+
+async function postJsonAsText(url: string, body: unknown): Promise<void> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+    body: JSON.stringify(body),
+  }).catch((err) => {
+    throw new Error(`网络请求失败（检查 URL / 网络）：${toError(err).message}`);
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = await res.json();
+      if (j && typeof j.errmsg === 'string') detail += `: ${j.errmsg}`;
+    } catch { /* opaque or non-json — keep status only */ }
+    throw new Error(detail);
+  }
+}
+
+async function hmacSha256Base64(keyStr: string, msgStr: string): Promise<string> {
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new Error('当前环境无 Web Crypto（需 localhost/https），无法计算签名');
+  }
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(keyStr),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(msgStr));
+  let bin = '';
+  for (const b of new Uint8Array(sig)) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+async function deliverDingTalk(payload: NotificationPayload): Promise<void> {
+  const cfg = config.providers;
+  const url0 = (cfg.dingtalkWebhookUrl ?? '').trim();
+  if (!url0) throw new Error('钉钉渠道需要填写机器人 Webhook 地址');
+  let url = url0;
+  const secret = (cfg.dingtalkSecret ?? '').trim();
+  if (secret) {
+    // 官方加签算法：sign = base64(hmac_sha256(key=secret, data=`${ts}\n${secret}`))
+    const ts = Date.now();
+    const sign = await hmacSha256Base64(secret, `${ts}\n${secret}`);
+    url += (url.includes('?') ? '&' : '?') + `timestamp=${ts}&sign=${encodeURIComponent(sign)}`;
+  }
+  await postJsonAsText(url, {
+    msgtype: 'markdown',
+    markdown: {
+      title: `${payload.title} DSH`,
+      text: `### ${payload.title}\n${payload.body}${payload.url ? `\n\n[${payload.url}](${payload.url})` : ''}`,
+    },
+  });
+}
+
+async function deliverFeishu(payload: NotificationPayload): Promise<void> {
+  const cfg = config.providers;
+  const url0 = (cfg.feishuWebhookUrl ?? '').trim();
+  if (!url0) throw new Error('飞书渠道需要填写机器人 Webhook 地址');
+  const secret = (cfg.feishuSecret ?? '').trim();
+  const ts = Math.floor(Date.now() / 1000);
+  const body: Record<string, unknown> = {
+    msg_type: 'text',
+    content: { text: `${payload.title}\n${payload.body}${payload.url ? `\n${payload.url}` : ''}` },
+  };
+  if (secret) {
+    // 飞书签名校验：key = `${ts}\n${secret}`，message 为空串，base64 输出
+    body.timestamp = ts;
+    body.sign = await hmacSha256Base64(`${ts}\n${secret}`, '');
+  }
+  await postJsonAsText(url0, body);
+}
+
+async function deliverWecom(payload: NotificationPayload): Promise<void> {
+  const cfg = config.providers;
+  if (!cfg.wecomWebhookUrl) throw new Error('企业微信渠道需要填写机器人 Webhook 地址');
+  await postJsonAsText(cfg.wecomWebhookUrl, {
+    msgtype: 'markdown',
+    markdown: {
+      content: `**${payload.title}**\n${payload.body}${payload.url ? `\n[打开 DSH](${payload.url})` : ''}`,
+    },
+  });
+}
+
 async function deliverDiscord(payload: NotificationPayload): Promise<void> {
   const cfg = config.providers;
   if (!cfg.discordWebhookUrl) throw new Error('Discord provider requires discordWebhookUrl');
@@ -699,6 +821,17 @@ const PROVIDER_FIELDS: Record<ProviderId, Array<{
   serverchan: [
     { key: 'serverchanSendKey', label: 'Server酱 SendKey', placeholder: 'SCT…' },
   ],
+  dingtalk: [
+    { key: 'dingtalkWebhookUrl', label: '钉钉机器人 Webhook', placeholder: 'https://oapi.dingtalk.com/robot/send?access_token=…' },
+    { key: 'dingtalkSecret', label: '加签密钥（可选）', placeholder: 'SEC… 开启「加签」安全设置时填写' },
+  ],
+  feishu: [
+    { key: 'feishuWebhookUrl', label: '飞书机器人 Webhook', placeholder: 'https://open.feishu.cn/open-apis/bot/v2/hook/…' },
+    { key: 'feishuSecret', label: '签名校验密钥（可选）', placeholder: '开启「签名校验」时填写' },
+  ],
+  wecom: [
+    { key: 'wecomWebhookUrl', label: '企业微信机器人 Webhook', placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…' },
+  ],
   discord: [
     { key: 'discordWebhookUrl', label: 'Discord Webhook URL', placeholder: 'https://discord.com/api/webhooks/…' },
   ],
@@ -714,15 +847,18 @@ const PROVIDER_FIELDS: Record<ProviderId, Array<{
 };
 
 const PROVIDER_LABELS: Array<[ProviderId, string]> = [
-  ['browser', '🌐 浏览器通知'],
-  ['telegram', '✈️ Telegram'],
-  ['bark', '🍎 Bark (iOS)'],
-  ['pushover', '📲 Pushover'],
-  ['serverchan', '🐦 Server酱'],
-  ['discord', '🎮 Discord'],
-  ['slack', '💼 Slack'],
-  ['webhook', '🔗 通用 Webhook'],
-  ['custom', '🛠 自定义'],
+  ['browser', '浏览器通知'],
+  ['serverchan', 'Server酱'],
+  ['dingtalk', '钉钉机器人'],
+  ['feishu', '飞书机器人'],
+  ['wecom', '企业微信机器人'],
+  ['bark', 'Bark (iOS)'],
+  ['pushover', 'Pushover'],
+  ['telegram', 'Telegram'],
+  ['discord', 'Discord'],
+  ['slack', 'Slack'],
+  ['webhook', '通用 Webhook'],
+  ['custom', '自定义'],
 ];
 
 const PANEL_STYLE_ID = 'dsh-completion-reminder-panel-style';
@@ -936,6 +1072,9 @@ const PROVIDER_DESCRIPTIONS: Record<ProviderId, string> = {
   bark: '通过 Bark HTTP API 推送到 iPhone。',
   pushover: '通过 Pushover 推送到 Android / iOS / 桌面。',
   serverchan: '推送到微信（sct.ftqq.com，SendKey）。',
+  dingtalk: '钉钉群自定义机器人。安全设置建议用「加签」，或至少设一个自定义关键词（如 DSH）。',
+  feishu: '飞书群自定义机器人。开启「签名校验」时需填密钥。',
+  wecom: '企业微信群机器人。群设置里添加机器人后复制 Webhook 地址。',
   discord: '通过 Discord Webhook 推送到频道。',
   slack: '通过 Slack Incoming Webhook 推送到频道。',
   webhook: 'POST JSON 到你提供的 URL。',
@@ -1041,9 +1180,16 @@ function buildPanelHtml(): string {
         <button type="button" data-reminder-action="reset">重置</button>
         <span class="dsh-reminder-panel-status" data-reminder-status></span>
       </footer>
-      <p class="dsh-reminder-panel-hint">配置只保存在本浏览器的 localStorage，不会上传任何服务器。</p>
+      <p class="dsh-reminder-panel-hint">${escapeHtml(storageFooterText())}</p>
     </div>
   `;
+}
+
+function storageFooterText(): string {
+  const st = storageStatus();
+  const base = '配置只保存在本浏览器，不会上传任何服务器。';
+  if (!st.ok) return `${base} ⚠️ ${st.detail}`;
+  return `${base} 当前站点：${st.detail}（注意：localhost 和 127.0.0.1 算不同站点，配置互不相通）`;
 }
 
 function wirePanelEvents(host: HTMLElement): void {
@@ -1118,7 +1264,7 @@ function wirePanelEvents(host: HTMLElement): void {
           url: typeof location !== 'undefined' ? location.href : '',
         };
         const payload: NotificationPayload = {
-          title: '🧪 DSH Completion Reminder — 测试',
+          title: '【测试】DSH 完成提醒',
           body: `这是 ${config.provider} 渠道的测试通知。Agent 完成后将使用相同的方式推送。`,
           url: ctx.url,
           status: 'success',

@@ -37,62 +37,54 @@ if (!existsSync(LIB_CLIENT)) {
 // ── Step 3: wrap client.js in __ModuleLoader__ format ──────────────────────
 
 const compiledCode = readFileSync(LIB_CLIENT, 'utf-8');
+const LIB_TYPES = resolve(LIB_DIR, 'types.js');
 
-const TYPES_CODE = `
-const DEFAULT_OPTIONS = {
-  provider: 'browser',
-  autoRequestPermission: true,
-  notifyOnSuccess: true,
-  notifyOnStopped: true,
-  notifyOnError: true,
-  suppressWhenFocused: true,
-  cooldownMs: 5000,
-  titleTemplate: function (ctx) {
-    if (ctx.status === 'success') return '✅ DSH Agent 已完成';
-    if (ctx.status === 'stopped') return '⏹ DSH Agent 已停止';
-    return '⚠️ DSH Agent 出错';
-  },
-  bodyTemplate: function (ctx) {
-    var parts = [];
-    if (ctx.agent) parts.push('Agent: ' + ctx.agent);
-    if (ctx.model) parts.push('Model: ' + ctx.model);
-    if (typeof ctx.durationMs === 'number') {
-      var total = Math.round(ctx.durationMs / 1000);
-      if (ctx.durationMs < 1000) parts.push('用时: ' + Math.round(ctx.durationMs) + 'ms');
-      else if (total >= 3600) parts.push('用时: ' + Math.floor(total / 3600) + 'h ' + Math.floor((total % 3600) / 60) + 'm');
-      else if (total >= 60) parts.push('用时: ' + Math.floor(total / 60) + 'm ' + (total % 60) + 's');
-      else parts.push('用时: ' + total + 's');
+/**
+ * Which runtime bindings does client.js import from './types.js'?
+ * Captured BEFORE the import lines are stripped below, so the inlined
+ * types module can destructure exactly what the client needs - new
+ * exports in types.ts flow through automatically.
+ */
+function typesImportsFrom(source) {
+  const names = [];
+  const re = /import\s+(?:type\s+)?\{([^}]+)\}\s+from\s+['"]\.\/types\.js['"]/g;
+  for (const m of source.matchAll(re)) {
+    for (const part of m[1].split(',')) {
+      const binding = part.trim();
+      if (!binding) continue;
+      const asMatch = binding.match(/^(\w+)\s+as\s+(\w+)$/);
+      names.push(asMatch ? `${asMatch[1]}: ${asMatch[2]}` : binding);
     }
-    if (!parts.length) return '代理任务已结束，点击查看详情。';
-    return parts.join(' · ');
-  },
-  onNotify: function () { return undefined; },
-  onError: function (err) { try { console.warn('[dsh-completion-reminder]', err); } catch (_e) {} },
-  providers: {},
-  clickUrl: '',
-  iconUrl: '',
-  showSettingsPanel: true,
-};
+  }
+  return names;
+}
 
-const DSH_CSS_VARS = {
-  bgModule: 'var(--dsw-alias-bg-module-platform)',
-  borderL1: 'var(--dsw-alias-border-l1)',
-  borderL2: 'var(--dsw-alias-border-l2)',
-  borderL3: 'var(--dsw-alias-border-l3)',
-  labelPrimary: 'var(--dsw-alias-label-primary)',
-  labelSecondary: 'var(--dsw-alias-label-secondary)',
-  labelTertiary: 'var(--dsw-alias-label-tertiary)',
-  labelCaption: 'var(--dsw-alias-label-caption)',
-  stateSuccessPrimary: 'var(--dsw-alias-state-success-primary)',
-  stateWarnPrimary: 'var(--dsw-alias-state-warn-primary)',
-  stateErrorPrimary: 'var(--dsw-alias-state-error-primary)',
-  stateBusinessPrimary: 'var(--dsw-alias-state-business-primary)',
-  buttonInfoFill: 'var(--dsw-alias-button-info-fill)',
-  shadowLv3: 'var(--dsw-shadow-lv3)',
-  fontStrong14: 'var(--dsw-font-s-strong-14)',
-  fontXs13: 'var(--dsw-font-xs-13)',
-};
-`;
+/**
+ * Turn compiled ESM (lib/types.js) into plain CJS-ish statements that
+ * assign onto a local `exports`. tsc emits inline `export const x = …`
+ * declarations (no trailing export list), so capture each declared name
+ * and emit `exports.<name> = <name>;` after it. types.ts imports
+ * nothing; interface/type exports vanish in JS output naturally.
+ */
+function transformTypesEsm(code) {
+  const names = [];
+  const out = code
+    .replace(
+      /^export\s+(?:declare\s+)?(?:async\s+)?(function\*?|const|class|let|var)\s+([A-Za-z_$][\w$]*)/gm,
+      (_, kind, name) => {
+        names.push(name);
+        return `${kind} ${name}`;
+      },
+    )
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (names.length === 0) {
+    throw new Error('[build] no exported runtime bindings found in lib/types.js');
+  }
+  const assigns = names.map((n) => `exports.${n} = ${n};`).join('\n');
+  return `${out}\n${assigns}`;
+}
+
 
 // Transform the compiled ESM.
 //
@@ -190,6 +182,27 @@ factoryCode = factoryCode
 
 // ── Build the final __ModuleLoader__ wrapper ────────────────────────────────
 
+// Inlined types module: auto-extracted from lib/types.js instead of a
+// hand-maintained copy. The hand copy drifted twice (missing
+// showSettingsPanel, then missing STORAGE_KEY - which silently broke
+// persistence in every released version). Never hand-write it again.
+if (!existsSync(LIB_TYPES)) {
+  console.error('[build] lib/types.js not found after tsc');
+  process.exit(1);
+}
+const typeBindings = typesImportsFrom(compiledCode);
+const typesBlock = [
+  '    var __types = (function () {',
+  '      var module = { exports: {} };',
+  '      var exports = module.exports;',
+  ...transformTypesEsm(readFileSync(LIB_TYPES, 'utf-8'))
+    .split('\n')
+    .map((l) => '      ' + l),
+  '      return module.exports;',
+  '    })();',
+  `    var { ${typeBindings.join(', ')} } = __types;`,
+].join('\n');
+
 const pluginId = 'dsh-completion-reminder';
 
 const bundleContent = `window.__ModuleLoader__.load({
@@ -199,8 +212,8 @@ const bundleContent = `window.__ModuleLoader__.load({
     var exports = module.exports;
     Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 
-    // ── inlined @dsh-completion-reminder/types ────────────────────
-${TYPES_CODE.split('\n').map((l) => '    ' + l).join('\n')}
+    // ── inlined types (auto-generated from lib/types.js) ───────────
+${typesBlock}
 
     // ── compiled client code ────────────────────────────────────────
 ${factoryCode.split('\n').map((l) => '    ' + l).join('\n')}

@@ -20,6 +20,9 @@ export type ProviderId =
   | 'bark'
   | 'pushover'
   | 'serverchan'
+  | 'dingtalk'
+  | 'feishu'
+  | 'wecom'
   | 'discord'
   | 'slack'
   | 'webhook'
@@ -49,6 +52,22 @@ export interface ProviderConfig {
 
   /** Server酱 SendKey (https://sct.ftqq.com) */
   serverchanSendKey?: string;
+
+  /**
+   * 钉钉自定义机器人 Webhook（完整 URL，含 access_token）。
+   * https://open.dingtalk.com/document/robots/custom-robot-access
+   */
+  dingtalkWebhookUrl?: string;
+  /** 钉钉机器人「加签」密钥（SEC 开头）。未开启加签则留空 */
+  dingtalkSecret?: string;
+
+  /** 飞书自定义机器人 Webhook（完整 URL）https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot */
+  feishuWebhookUrl?: string;
+  /** 飞书机器人「签名校验」密钥。未开启签名校验则留空 */
+  feishuSecret?: string;
+
+  /** 企业微信群机器人 Webhook（含 key 参数的完整 URL） */
+  wecomWebhookUrl?: string;
 
   /** Discord incoming webhook URL */
   discordWebhookUrl?: string;

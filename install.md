@@ -37,6 +37,30 @@ dsh web
 
 ## 切换渠道示例
 
+### 钉钉机器人
+
+1. 钉钉群 → 群设置 → 智能群助手 → 添加「自定义」机器人
+2. 安全设置建议选「加签」，记下 `SEC` 开头的密钥（或改用「自定义关键词」并填 `DSH`）
+3. 复制 Webhook 地址（含 `access_token`），面板里选「钉钉机器人」填入；开了加签就再填密钥
+4. 点「发送测试通知」验证
+
+### 飞书机器人
+
+1. 飞书群 → 设置 → 群机器人 → 添加「自定义机器人」
+2. 若开启「签名校验」记下密钥
+3. 复制 Webhook 地址，面板里选「飞书机器人」填入
+
+### 企业微信机器人
+
+1. 企业微信群右键 → 添加群机器人 → 记录 Webhook 地址（含 `key=` 参数）
+2. 面板里选「企业微信机器人」填入即可
+
+### Server酱 (微信)
+
+1. 微信扫码登录 [sct.ftqq.com](https://sct.ftqq.com)
+2. 拿到 SendKey（以 `SCT` 开头）
+3. 面板里选「Server酱」，凭证区出现 1 个字段
+
 ### Telegram
 
 1. 在 Telegram 中 `@BotFather` 创建 bot，拿到 `telegramBotToken`
@@ -49,26 +73,21 @@ dsh web
 2. 打开 Bark，记下你的设备 Key
 3. 面板里选 `Bark`，凭证区出现 2 个字段（Key + 可选 Server），填入 Key
 
-### Server酱 (微信)
-
-1. 微信扫码登录 [sct.ftqq.com](https://sct.ftqq.com)
-2. 拿到 SendKey（以 `SCT` 开头）
-3. 面板里选 `Server酱`，凭证区出现 1 个字段
-
 ## 故障排除
 
 | 问题 | 原因 | 解决方法 |
 |------|------|----------|
 | 安装报 `ERR_PNPM_ADDING_TO_ROOT` | profile 是 pnpm workspace root | 加 `-w` 标志重新执行 |
+| **刷新网页后设置重置** | ① 插件 < v1.5.0（STORAGE_KEY 缺失 bug）② 地址在 localhost 和 127.0.0.1 之间切换（不同源不共享存储） | 升级到 ≥ v1.5.0；固定用同一个地址打开 DSH（面板底部会显示当前站点） |
 | 找不到「完成提醒」tab | 装的是 < v1.3.1 | `dsh plugin --profile web update dsh-completion-reminder && dsh web` |
 | 「插件」section 里只有「可配置」 | DSH 主机 < v1.2 | 升级 DSH 主机 |
-| 凭证区看不到字段 | 切到对应渠道才会出现 | 在单选组里选 Telegram / Bark / 其他 |
+| 凭证区看不到字段 | 切到对应渠道才会出现 | 在单选组里选对应渠道 |
 | 浏览器通知不弹 | ① 权限未授予 ② 权限被拒 ③ 系统勿扰/应用通知关闭 | 面板选「浏览器通知」→ 点「请求权限」；若已拒绝，地址栏左侧锁形图标 → 通知 → 允许；再查系统设置 |
 | 开着 DSH 页面就收不到浏览器通知 | 「前台静默」开着（可见且聚焦时不通知） | 关掉该选项，或切到别的标签页/窗口等通知 |
-| Telegram 报 401/400 | `telegramBotToken` / `telegramChatId` 配错 | 用 `@BotFather` 重新获取 token；用 `getUpdates` 找 chat id |
-| 测试按钮提示「Telegram provider requires…」 | 凭证未填 | 凭证区填入对应字段 |
+| 钉钉发不出（errcode 310000） | 机器人安全设置不匹配 | 关键词过滤就把关键词设为 `DSH`；加签模式务必填密钥 |
+| 钉钉/飞书/企微提示网络失败 | Webhook 地址错或公司网络拦截 | 核对地址；企业内网可能需要代理出网 |
+| Telegram 报 401/400 | token / chat id 配错 | 用 `@BotFather` 重新获取；用 `getUpdates` 找 chat id |
 | 通知频率太高 | 多个 agent 接连完成 | 调大「冷却（ms）」，默认 5000 |
-| 切回浏览器通知 | 想撤销 Telegram 配置 | 单选组里点回「浏览器通知」 |
 | 完全停用 | — | `DSHCompletionReminder.deactivate()` |
 | 重置所有配置 | — | 设置面板里点「重置」按钮 |
 

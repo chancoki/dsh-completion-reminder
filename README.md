@@ -12,21 +12,29 @@
 - 🪟 标签页可见时默认静默（不打断工作），可通过开关关闭
 - ⏱ 内置 5 秒冷却，避免连续 agent 完成时刷屏
 
-## 9 种通知渠道
+## 12 种通知渠道
 
 | 渠道 | 适用人群 | 配置字段（按当前渠道只显示需要的） |
 |------|----------|--------------------|
-| 🌐 **browser**（默认） | 任何浏览器 | 无 |
-| ✈️ **Telegram** | Telegram 重度用户 | Bot Token / Chat ID |
-| 🍎 **Bark** | iPhone 用户 | Bark Key / Bark Server（可选） |
-| 📲 **Pushover** | 跨平台推送服务 | App Token / User Key / Device（可选） |
-| 🐦 **Server酱** | 国内微信推送 | SendKey |
-| 🎮 **Discord** | Discord 玩家 / 团队 | Webhook URL |
-| 💼 **Slack** | 团队工作区 | Webhook URL |
-| 🔗 **Webhook** | 自建服务 | URL |
-| 🛠 **Custom** | 完全自定义 | 占位（`customSend(payload)`） |
+| **浏览器通知**（默认） | 任何浏览器 | 无（需授权通知权限） |
+| **Server酱** | 微信推送 | SendKey |
+| **钉钉机器人** | 钉钉群 | Webhook 地址 / 加签密钥（可选） |
+| **飞书机器人** | 飞书群 | Webhook 地址 / 签名密钥（可选） |
+| **企业微信机器人** | 企业微信群 | Webhook 地址 |
+| **Bark (iOS)** | iPhone 用户 | Bark Key / Bark Server（可选） |
+| **Pushover** | 跨平台推送服务 | App Token / User Key / Device（可选） |
+| **Telegram** | Telegram 用户 | Bot Token / Chat ID |
+| **Discord** | Discord 频道 | Webhook URL |
+| **Slack** | Slack 工作区 | Webhook URL |
+| **通用 Webhook** | 自建服务 | URL |
+| **自定义** | 完全自定义 | 占位（`customSend(payload)`） |
 
-## 工作原理（v1.3）
+> 国内三家（钉钉 / 飞书 / 企业微信）的群机器人在浏览器端通过
+> `text/plain` 简单请求发送 JSON（绕开 CORS 预检），钉钉加签与飞书签名
+> 校验用 Web Crypto 在本地计算，密钥不出本机。若机器人开了「自定义关键词」
+> 过滤，请把关键词设为 `DSH`。
+
+## 工作原理
 
 ### 1. 完成检测
 
@@ -148,15 +156,18 @@ CI 自动完成构建、npm 发布、GitHub Release。
 
 ## 版本历史
 
-- **v1.4.0** — 三项修复：
-  - **浏览器通知**：不再在页面加载时无手势请求权限（浏览器会静默拒绝并污染
-    缓存状态）；`deliverBrowser` 每次读取实时 `Notification.permission`；
-    未授权时页内 toast 会给出具体指引；权限行只在选「浏览器通知」时显示，
-    「请求权限」按钮是唯一授权入口（用户手势，必定弹出系统询问）
-  - **渠道选择器改为单选组**：原生 `<select>` 的展开列表由 UA 渲染，暗色主题下
-    会出现白底白字；radio 完全由 CSS 变量着色，无弹层问题
-  - **设置入口标题去掉 🔔**（两处 slot 的 label 改为「完成提醒」）；
-    「前台静默」选项文案改为更明确的说明
+- **v1.5.0** — 渠道扩充 + 修复"刷新后设置重置"：
+  - 新增国内渠道：钉钉机器人（支持加签）、飞书机器人（支持签名校验）、
+    企业微信群机器人；均用 text/plain 简单请求 + JSON 体规避 CORS 预检，
+    签名用 Web Crypto 本地计算
+  - 渠道名去掉所有 emoji 表情
+  - **修复刷新重置**：构建脚本内联 types 的方式从手工拷贝改为自动提取
+    lib/types.js 并按 client 实际 import 解构——手工拷贝曾漏掉 STORAGE_KEY，
+    导致 localStorage 读写全部抛 ReferenceError 被吞、持久化从未生效
+  - 渠道发送失败现在会以页内 toast 提示具体原因（不再静默）
+  - 多标签页同源配置实时同步（storage 事件）；面板底部显示当前站点与
+    存储可用性，便于自查 localhost 与 127.0.0.1 配置互不相通的问题
+- **v1.4.0** — 手势安全的浏览器授权流程 + 单选组渠道选择器 + 去标题 emoji
 - **v1.3.1** — 修复设置入口从未出现的根因：插件现在导出 `inject = ['slots']`，
   cordis Loader 会等 slots 服务就绪才调用 `apply`（对齐 dshmarket 的做法）。
   之前 apply 跑在服务提供之前，`ctx.slots` 为 undefined，注册被静默跳过。
