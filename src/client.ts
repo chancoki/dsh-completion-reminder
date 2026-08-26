@@ -776,43 +776,95 @@ function apply(ctx: any, opts?: CompletionReminderOptions): void {
   configure(opts);
   activate();
 
-  // Try to register a settings section. If the host doesn't expose
-  // `ctx.slots` (older / different host), we silently fall back to the
-  // detection-only behaviour and surface a one-time hint.
+  // Register the settings entry point.
+  //
+  // The user finds this under "DSH 设置 → 插件 → 完成提醒" — a sibling
+  // tab to the existing "可配置" (configurable) tab. We register:
+  //   1. `settings.plugins.tab` — a new tab inside the Plugins section
+  //   2. `settings.section`      — fallback top-level section in case
+  //      the host is too old to expose the plugins tab slot
+  // The tab registration is the primary one and shows up in the right
+  // place; the section is registered too so the user can still find
+  // the configuration if the host has a non-standard Plugins UI.
   try {
-    if (ctx && ctx.inject && ctx.slots) {
+    if (ctx && ctx.slots) {
       const slots = ctx.slots;
-      const inject = ctx.inject;
+      const hostRef = { current: null as HTMLElement | null };
 
-      // The `slots.inject(name, factory)` API registers a slot
-      // contributor. The factory returns a teardown function (often
-      // `ctx.slots.register(...)`) that adds the entry. We keep the
-      // teardown around for symmetry but it is not currently used.
-      slots.inject('settings.section', () => {
-        // Register the section. The third arg is the React component
-        // factory; we provide a component that yields a ref-bound host.
-        const sectionFactory = makeSectionComponent((el) => {
-          state.panelHostEl = el;
-          injectPanelInto(el);
+      // ──── primary: a tab inside the Plugins section ────────────────
+      // DSH v1.2+ uses `settings.plugins.tab` to render tab buttons in
+      // the Plugins section. The component factory is invoked with DI
+      // props; we accept them and ignore everything except the empty
+      // `renderSlot`, since our body is a vanilla-DOM host.
+      try {
+        slots.inject('settings.plugins.tab', () => {
+          return slots.register(
+            {
+              name: 'settings.plugins.tab',
+              id: 'reminder',
+              order: 100,
+              label: () => '🔔 完成提醒',
+              locale: '@dsh-completion-reminder',
+              inject: () => ({}),
+            },
+            function ReminderPluginsTab() {
+              const localRef = useRef<HTMLDivElement | null>(null);
+              useEffect(() => {
+                if (localRef.current) {
+                  hostRef.current = localRef.current;
+                  injectPanelInto(localRef.current);
+                }
+                return () => {
+                  if (localRef.current) localRef.current.innerHTML = '';
+                };
+              }, []);
+              return React.createElement(Host, { ref: localRef });
+            },
+          );
         });
-        const off = slots.register(
-          {
-            name: 'settings.section',
-            id: 'reminder',
-            order: 50,
-            label: () => '🔔 提醒',
-            locale: '@dsh-completion-reminder',
-            inject: () => ({}),
-          },
-          sectionFactory,
-        );
-        return off;
-      });
+      } catch (err) {
+        try { console.warn('[dsh-completion-reminder] settings.plugins.tab registration failed:', err); } catch { /* noop */ }
+      }
+
+      // ──── fallback: top-level section ───────────────────────────────
+      // Older hosts that don't know about the plugins-tab slot will
+      // accept a top-level section registration so the user can still
+      // find the configuration.
+      try {
+        slots.inject('settings.section', () => {
+          const sectionFactory = makeSectionComponent((el) => {
+            hostRef.current = el;
+            injectPanelInto(el);
+          });
+          return slots.register(
+            {
+              name: 'settings.section',
+              id: 'reminder',
+              order: 50,
+              label: () => '🔔 提醒',
+              locale: '@dsh-completion-reminder',
+              inject: () => ({}),
+            },
+            sectionFactory,
+          );
+        });
+      } catch (err) {
+        try { console.warn('[dsh-completion-reminder] settings.section registration failed:', err); } catch { /* noop */ }
+      }
+
+      // If neither slot was registered, the host is too old. The
+      // detection still works, but the user has nowhere to configure;
+      // surface a hint.
+      if (!hostRef.current) {
+        // Defer: hostRef gets populated on tab/section mount, but
+        // that happens after DSH opens the dialog. Show a hint now.
+        showFirstRunHint('DSH 主机不支持 settings.plugins.tab 槽位。');
+      }
     } else {
       showFirstRunHint();
     }
   } catch (err) {
-    try { console.warn('[dsh-completion-reminder] failed to register settings section:', err); } catch { /* noop */ }
+    try { console.warn('[dsh-completion-reminder] failed to register settings UI:', err); } catch { /* noop */ }
     showFirstRunHint();
   }
 }
@@ -822,13 +874,14 @@ function apply(ctx: any, opts?: CompletionReminderOptions): void {
  * settings dialog. We only show it once and only when the section
  * registration failed (older host, no slots service, etc.).
  */
-function showFirstRunHint(): void {
+function showFirstRunHint(suffix?: string): void {
   if (state.hintEl || hasPersistedConfig()) return;
   injectHintStyles();
   const el = document.createElement('div');
   el.className = 'dsh-reminder-hint';
+  const msg = suffix || '已激活。请在 DSH 设置里配置通知渠道。';
   el.innerHTML = `
-    <span>🔔 DSH Completion Reminder 已激活。在「设置 → 🔔 提醒」中配置通知渠道。</span>
+    <span>🔔 DSH Completion Reminder ${escapeHtml(msg)}</span>
     <button type="button" data-reminder-hint-dismiss>知道了</button>
   `;
   el.querySelector('[data-reminder-hint-dismiss]')?.addEventListener('click', () => {

@@ -25,8 +25,8 @@ dsh web
 
 ## 配置通知渠道
 
-1. 打开 DSH → 点击左上角「⚙ 设置」
-2. 在左侧 nav 找到「🔔 提醒」
+1. 打开 DSH → 点击左上角「⚙ 设置」→ 进入「**插件**」section
+2. 在 tab 栏里点击「**🔔 完成提醒**」（与「可配置」同级）
 3. 选择通知渠道（默认 `🌐 浏览器通知`）
 4. 填入对应凭证（**凭证区只显示当前渠道需要的字段**）
 5. 调整「行为」选项（成功 / 主动停止 / 出错 是否通知、是否在标签页可见时静默、冷却时长）
@@ -60,8 +60,9 @@ dsh web
 | 问题 | 原因 | 解决方法 |
 |------|------|----------|
 | 安装报 `ERR_PNPM_ADDING_TO_ROOT` | profile 是 pnpm workspace root | 加 `-w` 标志重新执行 |
-| 找不到「🔔 提醒」入口 | 装的是 < v1.2.0 | `dsh plugin --profile web update dsh-completion-reminder && dsh web` |
-| 设置弹窗里看不到我的字段 | 切到对应渠道才会出现 | 在下拉里选 Telegram / Bark / 其他 |
+| 找不到「🔔 完成提醒」tab | 装的是 < v1.3.0 | `dsh plugin --profile web update dsh-completion-reminder && dsh web` |
+| 「插件」section 里只有「可配置」 | DSH 主机 < v1.2 | 升级 DSH 主机；或翻 v1.2 之前的版本 |
+| 凭证区看不到字段 | 切到对应渠道才会出现 | 在下拉里选 Telegram / Bark / 其他 |
 | 浏览器没弹权限询问 | 之前已「阻止」该网站 | 浏览器地址栏左侧锁形图标 → 通知 → 允许 |
 | Telegram 报 401/400 | `telegramBotToken` / `telegramChatId` 配错 | 用 `@BotFather` 重新获取 token；用 `getUpdates` 找 chat id |
 | 测试按钮提示「Telegram provider requires…」 | 凭证未填 | 凭证区填入对应字段 |

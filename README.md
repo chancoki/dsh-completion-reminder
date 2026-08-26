@@ -4,7 +4,7 @@
 当 agent 停止生成（成功 / 主动停止 / 出错）时，弹一个通知给用户。
 
 - 🌐 默认走 **浏览器原生通知**（`window.Notification`，首次使用需要用户授权）
-- ⚙️ 直接在 DSH 自己的 **「设置 → 🔔 提醒」** 里配置（与 General / Models / Plugins 同级）
+- ⚙️ 直接在 DSH 自己的 **「设置 → 插件 → 🔔 完成提醒」** 里配置（与「可配置」同级 tab）
 - 🔒 **凭证按渠道筛选**：选 Telegram 只显示 2 项，选 Bark 只显示 1–2 项，不会一下子蹦出 11 个无关字段
 - 🎨 **暗色 / 亮色主题都正常**（`color-scheme: light dark` + 显式前景色，再无「白底白字」）
 - 💾 配置保存在本浏览器 `localStorage`，不会上传任何服务器
@@ -26,7 +26,7 @@
 | 🔗 **Webhook** | 自建服务 | URL |
 | 🛠 **Custom** | 完全自定义 | 占位（`customSend(payload)`） |
 
-## 工作原理（v1.2）
+## 工作原理（v1.3）
 
 ### 1. 完成检测
 
@@ -44,8 +44,16 @@ DSH composer 卡片 `<div data-composer-card="true">` 内的主按钮 `aria-labe
 
 ### 2. 设置面板
 
-通过 DSH 的 `ctx.slots.inject('settings.section', ...)` API，插件把自己注册成
-DSH 设置弹窗里的一节。点击 DSH 侧边栏的「设置」→「🔔 提醒」即可看到：
+通过 DSH 的 `ctx.slots.inject('settings.plugins.tab', ...)` API，插件把自己注册成
+DSH 「插件」section 里与「可配置」**同级**的一个 tab：
+
+```
+DSH 设置弹窗 → 插件
+├─ 可配置        ← DSH 自带（编辑插件配置）
+├─ 🔔 完成提醒   ← 本插件
+```
+
+`settings.section` 同样被注册作为兜底（旧版本或非标准 host 仍能找到入口）。
 
 - 通知渠道下拉（切换渠道时，凭证区**实时刷新**）
 - 当前渠道**只显示需要的字段**（不需要在 11 个无关字段里翻找）
@@ -71,8 +79,8 @@ dsh web   # 重启
 
 ### 配置
 
-1. 打开 DSH → 点击左上角「设置」（齿轮图标）
-2. 在左侧 nav 找到「🔔 提醒」
+1. 打开 DSH → 点击左上角「⚙ 设置」→ 进入「插件」section
+2. 在 tab 栏里点击「🔔 完成提醒」
 3. 选择通知渠道（如 `Telegram`）
 4. 填入对应的 token / id（凭证区只显示当前渠道需要的字段）
 5. 点击「发送测试通知」验证渠道通不通
@@ -99,7 +107,7 @@ DSHCompletionReminder.requestBrowserPermission();
 | 方法 / 属性 | 说明 |
 |------|------|
 | `DSHCompletionReminder.configure(opts)` | 合并配置（与 localStorage 持久值叠加） |
-| `DSHCompletionReminder.activate()` | 启动 DOM 观察 + 注册设置节 |
+| `DSHCompletionReminder.activate()` | 启动 DOM 观察 + 注册设置入口 |
 | `DSHCompletionReminder.deactivate()` | 停止一切，清理 UI |
 | `DSHCompletionReminder.requestBrowserPermission()` | 手动触发浏览器通知权限请求 |
 | `DSHCompletionReminder.apply(ctx, opts)` | DSH Cordis Loader 入口 |
@@ -140,12 +148,11 @@ CI 自动完成构建、npm 发布、GitHub Release。
 
 ## 版本历史
 
-- **v1.2.0** — 设置面板进入 DSH 设置弹窗 + 凭证按渠道筛选 + 暗色主题修复：
-  - 通过 `ctx.slots.inject('settings.section', ...)` 注册为 DSH 设置弹窗里的一节
-  - 凭证字段按所选渠道过滤（Telegram 2 项 / Bark 1–2 项 / Pushover 2–3 项 / 其余 1 项）
-  - `<select>` 与 `<input>` 强制 `color-scheme: light dark` + 显式前景色，修复暗色主题下「白底白字」看不到选项的 bug
-  - 不再在右下角放浮动按钮（影响美观）
-  - 降级路径：host 不支持 slots 时显示一次性底部提示
+- **v1.3.0** — 设置面板进入「DSH 设置 → 插件」section 的 tab 栏（与「可配置」同级）：
+  - 改为 `ctx.slots.inject('settings.plugins.tab', ...)`，id=reminder, order=100, label='🔔 完成提醒'
+  - `settings.section` 保留为兜底（旧 host 仍能找到入口）
+  - jsdom smoke test 验证 tab 注入路径
+- **v1.2.0** — 设置面板进入 DSH 设置弹窗 + 凭证按渠道筛选 + 暗色主题修复
 - **v1.1.0** — 真实 DSH DOM 锚点 + 浮动按钮 + 11 凭证字段全显示
 - **v1.0.0** — 初始版本（class 名匹配，实际 DSH 上不可用）
 
