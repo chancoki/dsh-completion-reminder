@@ -103,6 +103,12 @@ function configure(opts?: CompletionReminderOptions): void {
     ...merged,
     providers: { ...DEFAULT_OPTIONS.providers, ...(merged.providers ?? {}) },
   };
+  // Migration guard: a provider removed in a later version (e.g. dingtalk/
+  // wecom in v1.7.0) may still sit in persisted config — fall back to the
+  // default instead of throwing on every dispatch.
+  if (!(PROVIDER_LABELS as Array<[string, string]>).some(([id]) => id === config.provider)) {
+    config.provider = DEFAULT_OPTIONS.provider;
+  }
   if (state.isActive) {
     // Re-render the open panel with new values.
     rerenderPanel();
@@ -446,9 +452,7 @@ async function dispatch(payload: NotificationPayload): Promise<void> {
     case 'bark':      return deliverBark(payload);
     case 'pushover':  return deliverPushover(payload);
     case 'serverchan':return deliverServerChan(payload);
-    case 'dingtalk':  return deliverDingTalk(payload);
     case 'feishu':    return deliverFeishu(payload);
-    case 'wecom':     return deliverWecom(payload);
     case 'discord':   return deliverDiscord(payload);
     case 'slack':     return deliverSlack(payload);
     case 'webhook':   return deliverWebhook(payload);
@@ -664,15 +668,12 @@ async function deliverServerChan(payload: NotificationPayload): Promise<void> {
   });
 }
 
-// ──── 国内渠道：钉钉 / 飞书 / 企业微信 ─────────────────────────────────────
+// ──── 国内渠道：飞书（可直连） ─────────────────────────────────────────────
 //
-// 三家接口对浏览器直连的支持差异很大（2026-08 实测）：
-//   飞书     POST 响应带完整 CORS 头（acao:*），application/json 直连可用；
-//   钉钉     必须 application/json（text/plain 报 43004），但响应无任何
-//            CORS 头、OPTIONS 预检也不放行 → 浏览器物理上无法直连；
-//   企业微信 响应同样无 CORS 头 → 即使发出也无法读取结果。
-// 因此飞书走标准 CORS 请求；钉钉/企微通过「本地转发」小服务中转
-// （relay/relay.mjs，一条命令启动，签名仍在插件本地计算，密钥不出机器）。
+// 国内渠道连通性（2026-08 实测）：飞书 POST 响应带完整 CORS 头（acao:*），
+// application/json 直连可用；钉钉必须 application/json（text/plain 报 43004）
+// 但无任何 CORS 头且预检不放行、企业微信同样无 CORS 头——浏览器物理上无法
+// 直连，这两个渠道已在 v1.7.0 移除。
 
 /** Readable cross-origin POST with JSON body; surfaces errcode/code as errors. */
 async function postJsonCors(url: string, body: unknown): Promise<void> {
@@ -691,42 +692,12 @@ async function postJsonCors(url: string, body: unknown): Promise<void> {
     const msg = data && (data.errmsg ?? data.msg);
     throw new Error(`HTTP ${res.status}${typeof msg === 'string' ? `: ${msg}` : ''}`);
   }
-  // DingTalk/WeCom use {errcode, errmsg}; Feishu uses {code, msg}.
   if (data && typeof data === 'object') {
     const errcode = data.errcode ?? data.code;
     if (typeof errcode === 'number' && errcode !== 0) {
       const msg = data.errmsg ?? data.msg;
       throw new Error(`errcode ${errcode}${typeof msg === 'string' ? `: ${msg}` : ''}`);
     }
-  }
-}
-
-const RELAY_HINT =
-  '该渠道不允许浏览器直连（对方服务器不支持 CORS）。' +
-  '请在凭证区填写「本地转发地址」（默认 http://127.0.0.1:8765）并启动随插件附带的转发小服务：' +
-  'node relay.mjs（详见设置页说明 / install.md）。';
-
-async function postViaRelay(targetUrl: string, body: unknown): Promise<void> {
-  const cfg = config.providers;
-  const relay = (cfg.relayUrl ?? '').trim().replace(/\/+$/, '');
-  if (!relay) throw new Error(RELAY_HINT);
-  let res: Response;
-  try {
-    res = await fetch(`${relay}/forward`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: targetUrl, body }),
-    });
-  } catch (err) {
-    throw new Error(`无法连接本地转发服务 ${relay}/forward（${toError(err).message}）。请先启动转发小服务：node relay.mjs`);
-  }
-  let data: { ok?: boolean; error?: string; status?: number } | undefined;
-  try {
-    data = await res.json();
-  } catch { /* non-json */ }
-  if (!res.ok) throw new Error(`本地转发 HTTP ${res.status}${data && data.error ? `: ${data.error}` : ''}`);
-  if (data && data.ok === false) {
-    throw new Error(`对方返回 ${data.error ?? `HTTP ${data.status ?? '?'}`}`);
   }
 }
 
@@ -748,27 +719,6 @@ async function hmacSha256Base64(keyStr: string, msgStr: string): Promise<string>
   return btoa(bin);
 }
 
-async function deliverDingTalk(payload: NotificationPayload): Promise<void> {
-  const cfg = config.providers;
-  const url0 = (cfg.dingtalkWebhookUrl ?? '').trim();
-  if (!url0) throw new Error('钉钉渠道需要填写机器人 Webhook 地址');
-  let url = url0;
-  const secret = (cfg.dingtalkSecret ?? '').trim();
-  if (secret) {
-    // 官方加签算法：sign = base64(hmac_sha256(key=secret, data=`${ts}\n${secret}`))
-    const ts = Date.now();
-    const sign = await hmacSha256Base64(secret, `${ts}\n${secret}`);
-    url += (url.includes('?') ? '&' : '?') + `timestamp=${ts}&sign=${encodeURIComponent(sign)}`;
-  }
-  await postViaRelay(url, {
-    msgtype: 'markdown',
-    markdown: {
-      title: `${payload.title} DSH`,
-      text: `### ${payload.title}\n${payload.body}${payload.url ? `\n\n[${payload.url}](${payload.url})` : ''}`,
-    },
-  });
-}
-
 async function deliverFeishu(payload: NotificationPayload): Promise<void> {
   const cfg = config.providers;
   const url0 = (cfg.feishuWebhookUrl ?? '').trim();
@@ -785,17 +735,6 @@ async function deliverFeishu(payload: NotificationPayload): Promise<void> {
     body.sign = await hmacSha256Base64(`${ts}\n${secret}`, '');
   }
   await postJsonCors(url0, body);
-}
-
-async function deliverWecom(payload: NotificationPayload): Promise<void> {
-  const cfg = config.providers;
-  if (!cfg.wecomWebhookUrl) throw new Error('企业微信渠道需要填写机器人 Webhook 地址');
-  await postViaRelay(cfg.wecomWebhookUrl, {
-    msgtype: 'markdown',
-    markdown: {
-      content: `**${payload.title}**\n${payload.body}${payload.url ? `\n[打开 DSH](${payload.url})` : ''}`,
-    },
-  });
 }
 
 async function deliverDiscord(payload: NotificationPayload): Promise<void> {
@@ -862,18 +801,9 @@ const PROVIDER_FIELDS: Record<ProviderId, Array<{
   serverchan: [
     { key: 'serverchanSendKey', label: 'Server酱 SendKey', placeholder: 'SCT…' },
   ],
-  dingtalk: [
-    { key: 'dingtalkWebhookUrl', label: '钉钉机器人 Webhook', placeholder: 'https://oapi.dingtalk.com/robot/send?access_token=…' },
-    { key: 'dingtalkSecret', label: '加签密钥（可选）', placeholder: 'SEC… 开启「加签」安全设置时填写' },
-    { key: 'relayUrl', label: '本地转发地址（必填）', placeholder: 'http://127.0.0.1:8765 — 先运行 node relay.mjs' },
-  ],
   feishu: [
     { key: 'feishuWebhookUrl', label: '飞书机器人 Webhook', placeholder: 'https://open.feishu.cn/open-apis/bot/v2/hook/…' },
     { key: 'feishuSecret', label: '签名校验密钥（可选）', placeholder: '开启「签名校验」时填写' },
-  ],
-  wecom: [
-    { key: 'wecomWebhookUrl', label: '企业微信机器人 Webhook', placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…' },
-    { key: 'relayUrl', label: '本地转发地址（必填）', placeholder: 'http://127.0.0.1:8765 — 先运行 node relay.mjs' },
   ],
   discord: [
     { key: 'discordWebhookUrl', label: 'Discord Webhook URL', placeholder: 'https://discord.com/api/webhooks/…' },
@@ -892,9 +822,7 @@ const PROVIDER_FIELDS: Record<ProviderId, Array<{
 const PROVIDER_LABELS: Array<[ProviderId, string]> = [
   ['browser', '浏览器通知'],
   ['serverchan', 'Server酱'],
-  ['dingtalk', '钉钉机器人'],
   ['feishu', '飞书机器人'],
-  ['wecom', '企业微信机器人'],
   ['bark', 'Bark (iOS)'],
   ['pushover', 'Pushover'],
   ['telegram', 'Telegram'],
@@ -1115,9 +1043,7 @@ const PROVIDER_DESCRIPTIONS: Record<ProviderId, string> = {
   bark: '通过 Bark HTTP API 推送到 iPhone。',
   pushover: '通过 Pushover 推送到 Android / iOS / 桌面。',
   serverchan: '推送到微信（sct.ftqq.com，SendKey）。',
-  dingtalk: '钉钉群自定义机器人。浏览器无法直连钉钉接口，需按面板提示启动本地转发小服务（relay.mjs）；安全设置建议「加签」或关键词设为 DSH。',
   feishu: '飞书群自定义机器人，可从浏览器直连。开启「签名校验」时需填密钥。',
-  wecom: '企业微信群机器人。浏览器无法直连企微接口，需启动本地转发小服务（同钉钉）。',
   discord: '通过 Discord Webhook 推送到频道。',
   slack: '通过 Slack Incoming Webhook 推送到频道。',
   webhook: 'POST JSON 到你提供的 URL。',

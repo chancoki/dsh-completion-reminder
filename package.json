@@ -1,7 +1,7 @@
 {
   "name": "dsh-completion-reminder",
-  "version": "1.6.0",
-  "description": "DSH client plugin — notify the user when an agent finishes. 12 channels incl. DingTalk/Feishu/WeCom bots; settings live inside DSH's dialog; persistent config.",
+  "version": "1.7.0",
+  "description": "DSH client plugin — notify the user when an agent finishes. 10 directly-reachable channels incl. Feishu bots; settings live inside DSH's dialog; persistent config.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -55,7 +55,6 @@
   "files": [
     "lib",
     "dist",
-    "relay",
     "cordis.patch.yml",
     "README.md",
     "install.md"
