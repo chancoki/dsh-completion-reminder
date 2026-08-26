@@ -2,6 +2,12 @@ node_modules/
 lib/
 dist/
 .npm-cache/
+.npm-logs/
+probes/downloaded.txt
+probes/_deepseek-ai_*.txt
+probes/dsh-client-ui-*.txt
+.github-token.json
+.npmrc
 *.log
 .DS_Store
 .env

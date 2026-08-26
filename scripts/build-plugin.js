@@ -71,18 +71,26 @@ const DEFAULT_OPTIONS = {
   providers: {},
   clickUrl: '',
   iconUrl: '',
+  showSettingsPanel: true,
 };
 
 const DSH_CSS_VARS = {
   bgModule: 'var(--dsw-alias-bg-module-platform)',
+  borderL1: 'var(--dsw-alias-border-l1)',
+  borderL2: 'var(--dsw-alias-border-l2)',
   borderL3: 'var(--dsw-alias-border-l3)',
   labelPrimary: 'var(--dsw-alias-label-primary)',
   labelSecondary: 'var(--dsw-alias-label-secondary)',
   labelTertiary: 'var(--dsw-alias-label-tertiary)',
+  labelCaption: 'var(--dsw-alias-label-caption)',
   stateSuccessPrimary: 'var(--dsw-alias-state-success-primary)',
   stateWarnPrimary: 'var(--dsw-alias-state-warn-primary)',
   stateErrorPrimary: 'var(--dsw-alias-state-error-primary)',
+  stateBusinessPrimary: 'var(--dsw-alias-state-business-primary)',
+  buttonInfoFill: 'var(--dsw-alias-button-info-fill)',
   shadowLv3: 'var(--dsw-shadow-lv3)',
+  fontStrong14: 'var(--dsw-font-s-strong-14)',
+  fontXs13: 'var(--dsw-font-xs-13)',
 };
 `;
 
@@ -193,6 +201,7 @@ const standaloneDist = `/**
     providers: {},
     clickUrl: '',
     iconUrl: '',
+    showSettingsPanel: true,
     onNotify: function () { return undefined; },
     onError: function (err) { try { console.warn('[dsh-completion-reminder]', err); } catch (_e) {} },
     titleTemplate: function (ctx) {

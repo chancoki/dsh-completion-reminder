@@ -1,21 +1,19 @@
 /**
- * DSH Completion Reminder — client half.
+ * DSH Completion Reminder — client half (v1.1).
  *
- * A DOM-based DSH client plugin that fires a notification when the agent
- * stops generating. The plugin watches the input toolbar (send vs stop
- * button) and the conversation stream to detect three terminal states:
- * success, user-stopped, and error.
+ * Detects the agent-completion lifecycle by watching the DSH composer
+ * primary button's `aria-label` (which flips between "Stop generating" /
+ * "Stop 生成" / "Stop" while running and "Send message" / "发送消息" /
+ * "Send" when idle) and the conversation root's `data-phase` (which
+ * transitions through `active` / `settling` / `hero`).
  *
- * Delivery channels:
- *   - browser   : window.Notification (default; user-gated permission)
- *   - telegram  : Telegram Bot API
- *   - bark      : Apple Push (Bark) HTTP API
- *   - pushover  : Pushover REST API
- *   - serverchan: Server酱 (sct.ftqq.com) — popular in CN
- *   - discord   : Discord incoming webhook
- *   - slack     : Slack incoming webhook
- *   - webhook   : generic JSON POST webhook
- *   - custom    : user-supplied function
+ * The plugin:
+ *   - exposes `window.DSHCompletionReminder.configure({...})` for API users
+ *   - injects a floating 🔔 button in the bottom-right corner that opens
+ *     a settings panel (provider picker + per-provider credentials + test
+ *     button). Configuration is persisted to localStorage.
+ *   - delivers notifications via 9 channels: browser, Telegram, Bark,
+ *     Pushover, Server酱, Discord, Slack, generic Webhook, custom.
  *
  * The plugin is packaged as a DSH client plugin (`dsh.client` in
  * package.json) and loaded through `window.__ModuleLoader__`.
@@ -25,6 +23,7 @@ import type {
   AgentRunStatus,
   CompletionReminderOptions,
   NotificationPayload,
+  PersistedConfig,
   ProviderConfig,
   ProviderId,
   TitleContext,
@@ -32,6 +31,7 @@ import type {
 import {
   DEFAULT_OPTIONS,
   DSH_CSS_VARS,
+  STORAGE_KEY,
   formatDuration,
 } from './types.js';
 
@@ -43,84 +43,93 @@ type ResolvedOptions = typeof DEFAULT_OPTIONS & {
 
 let config: ResolvedOptions = { ...DEFAULT_OPTIONS };
 
-const state = {
-  observer: null as MutationObserver | null,
-  runStartedAt: null as number | null,
-  lastModel: null as string | null,
-  lastAgent: null as string | null,
+const state: {
+  observer: MutationObserver | null;
+  runStartedAt: number | null;
+  lastModel: string | null;
+  lastAgent: string | null;
+  inFlight: boolean;
+  lastNotifiedAt: number;
+  isActive: boolean;
+  permission: NotificationPermission | 'unsupported';
+  unbinder: Array<() => void>;
+  settingsPanelEl: HTMLElement | null;
+  settingsButtonEl: HTMLElement | null;
+  panelOpen: boolean;
+} = {
+  observer: null,
+  runStartedAt: null,
+  lastModel: null,
+  lastAgent: null,
   inFlight: false,
   lastNotifiedAt: 0,
   isActive: false,
   permission: detectPermission(),
-  unbinder: [] as Array<() => void>,
+  unbinder: [],
+  settingsPanelEl: null,
+  settingsButtonEl: null,
+  panelOpen: false,
 };
 
-// ──── DOM selectors used to detect the agent run lifecycle ─────────────────
+// ──── DOM signals we look at ───────────────────────────────────────────────
 
 /**
- * Selectors for the input toolbar's send/stop button. DSH renders the
- * same component with a different icon/aria-label while the agent is
- * running; we watch the button's `aria-label` and `data-*` attributes.
+ * The composer card root in DSH: `<div data-composer-card="true">…</div>`.
+ * It contains the textarea, the `data-input-scroll` scrollport, and the
+ * primary send/stop button.
  */
-const TOOLBAR_BUTTON_SELECTORS = [
-  // DSH common: button with a "send" / "stop" accessible name.
-  'button[aria-label*="send" i]',
-  'button[aria-label*="stop" i]',
-  'button[aria-label*="停止" i]',
-  'button[aria-label*="发送" i]',
-  'button[aria-label*="取消" i]',
-  'button[aria-label*="中止" i]',
-  'button[aria-label*="abort" i]',
-  'button[aria-label*="cancel" i]',
-  // DSH common: button type="submit" in the chat form.
-  'form button[type="submit"]',
-  'textarea + * button',
-  'textarea ~ button',
-];
+const COMPOSER_CARD_SELECTOR = '[data-composer-card]';
 
-/** Texts that, when present on a visible button, mean "agent is running". */
+/**
+ * The composer root containing all sessions. Has `data-phase` attribute
+ * ('hero' | 'active' | 'settling'). We use this to disambiguate "first
+ * paint idle" from "completed and went idle".
+ */
+const CONVERSATION_ROOT_SELECTOR = '[data-conversation-scroll], [data-composer-seat]';
+
+/**
+ * The primary send/stop button. DSH flips its `aria-label` between
+ * "Stop generating" / "停止生成" (while running) and "Send message" /
+ * "发送消息" (when idle).  In addition, DSH adds `disabled` to the
+ * button when the draft is empty.
+ *
+ * We do NOT match by class name (CSS-modules hashes change between
+ * builds) — only by stable attributes.
+ */
+const PRIMARY_BUTTON_SELECTOR = 'button[type="button"]';
+
+/**
+ * Tokens we look for in the primary button's `aria-label` to detect
+ * a *running* agent.
+ */
 const RUNNING_TOKENS = [
-  'stop',
-  'stop generating',
-  '停止',
-  '中止',
-  '取消生成',
-  'abort',
-  'cancel',
-  'pause',
-  '暂停',
-  'interrupt',
+  'stop generating', '停止生成', '停止', 'stop',
+  'abort', 'cancel generating', 'cancel',
 ];
 
-/** Texts that mean "the run has finished (successfully)". */
-const SUCCESS_TOKENS = [
-  'send',
-  '发送',
-  'submit',
-  '提交',
+/** Tokens for an *idle* / send button. */
+const IDLE_TOKENS = [
+  'send message', '发送消息', 'send', '发送',
 ];
 
-/** Selectors for the active conversation. */
-const CONVERSATION_SELECTORS = [
-  '[data-conversation-id]',
-  '[data-conversation]',
-  'main [class*="conversation"]',
-  'main [class*="chat"]',
-  'main [class*="message"]',
-];
-
-// ──── Public configure / activate / deactivate ────────────────────────────
+// ──── Public API ───────────────────────────────────────────────────────────
 
 function configure(opts?: CompletionReminderOptions): void {
-  if (!opts) {
-    config = { ...DEFAULT_OPTIONS };
-    return;
+  // First merge in any persisted config so the panel + programmatic
+  // configure() play nicely together.
+  const persisted = loadPersisted();
+  const merged: CompletionReminderOptions = { ...persisted, ...(opts ?? {}) };
+  if (!opts || opts.providers === undefined) {
+    merged.providers = { ...(persisted.providers ?? {}), ...(opts?.providers ?? {}) };
   }
   config = {
     ...DEFAULT_OPTIONS,
-    ...opts,
-    providers: { ...DEFAULT_OPTIONS.providers, ...(opts.providers ?? {}) },
+    ...merged,
+    providers: { ...DEFAULT_OPTIONS.providers, ...(merged.providers ?? {}) },
   };
+  if (state.isActive) {
+    refreshSettingsButtonVisibility();
+  }
 }
 
 function activate(): void {
@@ -137,6 +146,9 @@ function activate(): void {
 
   startObserver();
   bindVisibilityEvents();
+  if (config.showSettingsPanel) {
+    ensureSettingsButton();
+  }
 }
 
 function deactivate(): void {
@@ -145,8 +157,43 @@ function deactivate(): void {
   for (const off of state.unbinder.splice(0)) {
     try { off(); } catch { /* noop */ }
   }
+  removeSettingsUI();
   state.runStartedAt = null;
   state.inFlight = false;
+}
+
+// ──── Persistence ──────────────────────────────────────────────────────────
+
+function loadPersisted(): PersistedConfig {
+  if (typeof localStorage === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as PersistedConfig;
+    return parsed ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function savePersisted(): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const out: PersistedConfig = {
+      provider: config.provider,
+      autoRequestPermission: config.autoRequestPermission,
+      notifyOnSuccess: config.notifyOnSuccess,
+      notifyOnStopped: config.notifyOnStopped,
+      notifyOnError: config.notifyOnError,
+      suppressWhenFocused: config.suppressWhenFocused,
+      cooldownMs: config.cooldownMs,
+      showSettingsPanel: config.showSettingsPanel,
+      providers: config.providers,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(out));
+  } catch {
+    // localStorage may be disabled — silently ignore.
+  }
 }
 
 // ──── Permission handling ──────────────────────────────────────────────────
@@ -180,16 +227,19 @@ function startObserver(): void {
   if (state.observer) state.observer.disconnect();
 
   state.observer = new MutationObserver(handleMutations);
+  // Watch the whole document — DSH may swap the conversation root on
+  // session change. We only act on changes inside the composer card or
+  // the conversation root, which is cheap to filter in the callback.
   state.observer.observe(document.body, {
     childList: true,
     subtree: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ['aria-label', 'aria-pressed', 'data-state', 'data-status', 'class', 'disabled'],
+    attributeFilter: ['aria-label', 'aria-disabled', 'data-phase', 'data-state', 'class', 'disabled'],
   });
 
-  // Take an initial reading of the current state.
-  scanCurrentRun();
+  // Take an initial reading.
+  evaluateNow();
 }
 
 function stopObserver(): void {
@@ -202,176 +252,164 @@ function stopObserver(): void {
 function handleMutations(mutations: MutationRecord[]): void {
   if (!state.isActive) return;
   for (const m of mutations) {
-    // Toolbar changes (send ↔ stop swap) are the strongest signal.
-    if (m.type === 'attributes' || m.type === 'characterData') {
+    // Attribute changes on the primary button or its `data-composer-card`
+    // ancestor are the most precise signal.
+    if (m.type === 'attributes') {
       const target = m.target as Element | null;
-      if (target && isInsideToolbar(target)) {
-        evaluateToolbar();
+      if (target && isInsideComposer(target)) {
+        evaluateNow();
+        continue;
       }
     }
-
-    // New child nodes can also flip the toolbar; check the subtree root.
+    // Newly added composer cards / buttons.
     for (const node of m.addedNodes) {
       if (!(node instanceof HTMLElement)) continue;
-      if (node.matches?.(TOOLBAR_BUTTON_SELECTORS.join(','))) {
-        evaluateToolbar();
-      } else if (node.querySelector?.(TOOLBAR_BUTTON_SELECTORS.join(','))) {
-        evaluateToolbar();
+      if (
+        node.matches?.(COMPOSER_CARD_SELECTOR) ||
+        node.querySelector?.(COMPOSER_CARD_SELECTOR)
+      ) {
+        evaluateNow();
       }
     }
   }
 }
 
-function isInsideToolbar(el: Element): boolean {
-  return !!el.closest('form, [class*="composer" i], [class*="toolbar" i], [class*="input" i], [class*="chat-input" i]');
+function isInsideComposer(el: Element): boolean {
+  return !!el.closest(COMPOSER_CARD_SELECTOR);
 }
 
-function scanCurrentRun(): void {
-  // Without any history, we don't know whether the user is mid-run.
-  // Trust the current toolbar state on first paint.
-  evaluateToolbar();
-}
-
-function evaluateToolbar(): void {
-  const buttons = collectToolbarButtons();
-  if (!buttons.length) return;
-
-  // Look for a button whose text/aria-label signals "running".
-  const running = buttons.find((b) => matchesAny(b, RUNNING_TOKENS));
-  const idle = buttons.find((b) => matchesAny(b, SUCCESS_TOKENS));
-
-  // Refresh cached model/agent name opportunistically.
+function evaluateNow(): void {
+  const primary = findPrimaryButton();
   captureRunMetadata();
 
-  if (running && !state.inFlight) {
-    // Edge: idle → running
+  const isRunning = !!primary && isRunningButton(primary);
+  if (isRunning && !state.inFlight) {
+    // idle → running
     state.inFlight = true;
     state.runStartedAt = Date.now();
     return;
   }
-
-  if (!running && state.inFlight) {
-    // Edge: running → idle. We treat any exit-from-running as a
-    // completion event and decide success vs stopped vs error by
-    // inspecting the latest assistant message and any visible error.
+  if (!isRunning && state.inFlight) {
+    // running → idle: completion event
     state.inFlight = false;
     const startedAt = state.runStartedAt ?? Date.now();
     const durationMs = Date.now() - startedAt;
     state.runStartedAt = null;
     void completeRun(determineStatus(), durationMs);
   }
-
-  // When the page first loads idle, do nothing.
-  void idle;
-}
-
-/** Returns the buttons in the composer toolbar (send/stop/... ). */
-function collectToolbarButtons(): HTMLElement[] {
-  const out: HTMLElement[] = [];
-  const forms = document.querySelectorAll<HTMLElement>('form, [class*="composer" i], [class*="toolbar" i]');
-  for (const f of forms) {
-    const buttons = f.querySelectorAll<HTMLElement>('button');
-    buttons.forEach((b) => {
-      if (b.offsetParent !== null || b.getClientRects().length) out.push(b);
-    });
-  }
-  // Also include bare buttons that match one of the toolbar selectors
-  // outside a known form (best effort).
-  for (const sel of TOOLBAR_BUTTON_SELECTORS) {
-    document.querySelectorAll<HTMLElement>(sel).forEach((b) => {
-      if (b.offsetParent !== null || b.getClientRects().length) {
-        if (!out.includes(b)) out.push(b);
-      }
-    });
-  }
-  return out;
-}
-
-function matchesAny(btn: HTMLElement, tokens: string[]): boolean {
-  const text = (btn.textContent ?? '').trim().toLowerCase();
-  const aria = (btn.getAttribute('aria-label') ?? '').trim().toLowerCase();
-  const title = (btn.getAttribute('title') ?? '').trim().toLowerCase();
-  const cls = (btn.getAttribute('class') ?? '').toLowerCase();
-  const hay = `${text} ${aria} ${title} ${cls}`;
-  return tokens.some((tok) => hay.includes(tok));
 }
 
 /**
- * Inspect the most recent assistant message to decide success vs error.
- * If we can't decide, default to 'success' (the common case).
+ * Find the primary send/stop button by walking up from the composer card.
+ * The button is the only `<button type="button">` inside the composer that
+ * is NOT the leading add-command button, so we look for buttons with an
+ * aria-label that includes one of the well-known tokens.
+ */
+function findPrimaryButton(): HTMLButtonElement | null {
+  const card = document.querySelector<HTMLElement>(COMPOSER_CARD_SELECTOR);
+  if (!card) return null;
+  const buttons = card.querySelectorAll<HTMLButtonElement>('button[type="button"]');
+  for (const b of buttons) {
+    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+    if (
+      RUNNING_TOKENS.some((t) => aria.includes(t)) ||
+      IDLE_TOKENS.some((t) => aria.includes(t))
+    ) {
+      return b;
+    }
+  }
+  // Last-resort: if the composer has exactly one button, use it.
+  if (buttons.length === 1) return buttons[0];
+  return null;
+}
+
+function isRunningButton(btn: HTMLButtonElement): boolean {
+  const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+  return RUNNING_TOKENS.some((t) => aria.includes(t));
+}
+
+/**
+ * Look at the conversation list to figure out success / error / stopped.
+ * If we cannot decide, default to 'success' (the common case).
  */
 function determineStatus(): AgentRunStatus {
-  // If the user pressed stop while we were running, we still flag the
-  // event as 'stopped' when an explicit stopped/error marker is visible.
-  const lastAssistant = findLastAssistantMessage();
-  if (!lastAssistant) return 'success';
+  // Strongest signal: the conversation root's `data-phase` is `settling`
+  // while a turn is being finalised. We treat the moment it leaves
+  // `settling` as completion.
+  const root = document.querySelector<HTMLElement>(CONVERSATION_ROOT_SELECTOR);
+  const phase = root?.getAttribute('data-phase');
+  if (phase === 'settling') {
+    return 'success';
+  }
 
-  const text = (lastAssistant.textContent ?? '').toLowerCase();
-  if (/(error|exception|failed|traceback|错误|失败|异常)/.test(text) &&
-      !/no error|没有错误|successfully|成功/.test(text)) {
-    return 'error';
+  // Next, look at the latest assistant turn. If its last child has
+  // [data-state="interrupted"] / [data-state="error"] / class includes
+  // "error" / "stop", we have a more specific status.
+  const lastAssistant = findLastAssistantTurn();
+  if (lastAssistant) {
+    const cls = (lastAssistant.getAttribute('class') ?? '').toLowerCase();
+    const ds = (lastAssistant.getAttribute('data-state') ?? '').toLowerCase();
+    if (ds === 'interrupted' || cls.includes('interrupt') || cls.includes('stop')) {
+      return 'stopped';
+    }
+    if (ds === 'error' || cls.includes('error') || cls.includes('fail')) {
+      return 'error';
+    }
+    const text = (lastAssistant.textContent ?? '').toLowerCase();
+    if (/(error|exception|failed|traceback|错误|失败|异常)/.test(text) &&
+        !/no error|没有错误|successfully|成功/.test(text)) {
+      return 'error';
+    }
+    if (/(stopped by user|user stopped|手动停止|已停止|已取消)/.test(text)) {
+      return 'stopped';
+    }
   }
-  if (/(stopped by user|user stopped|手动停止|已停止|已取消)/.test(text)) {
-    return 'stopped';
-  }
+
   return 'success';
 }
 
-function findLastAssistantMessage(): HTMLElement | null {
-  for (const sel of CONVERSATION_SELECTORS) {
-    const all = document.querySelectorAll<HTMLElement>(sel);
-    for (let i = all.length - 1; i >= 0; i--) {
-      const el = all[i];
-      const role = (el.getAttribute('data-role') ?? el.getAttribute('data-author') ?? '')
-        .toLowerCase();
-      if (role.includes('assistant') || role.includes('agent') || role.includes('model')) {
-        return el;
-      }
-    }
+function findLastAssistantTurn(): HTMLElement | null {
+  const scroll = document.querySelector<HTMLElement>(CONVERSATION_ROOT_SELECTOR);
+  if (!scroll) return null;
+  const candidates = scroll.querySelectorAll<HTMLElement>(
+    '[data-role="assistant"], [data-author="assistant"], [data-author="model"]',
+  );
+  if (candidates.length) return candidates[candidates.length - 1];
+  let last: HTMLElement | null = null;
+  for (const child of Array.from(scroll.children)) {
+    if (child instanceof HTMLElement) last = child;
   }
-  // Fallback: the last child in the conversation stream is the latest
-  // message — if its text looks like an error we already know.
-  const main = document.querySelector('main');
-  const last = main?.lastElementChild;
-  return last instanceof HTMLElement ? last : null;
+  return last;
 }
 
 function captureRunMetadata(): void {
-  const model = readModelFromHeader();
-  if (model) state.lastModel = model;
-
-  const agent = readAgentFromHeader();
-  if (agent) state.lastAgent = agent;
-}
-
-function readModelFromHeader(): string | null {
-  // DSH renders a model label (e.g. "DeepSeek-V3") in a header chip.
-  const candidates = document.querySelectorAll<HTMLElement>(
-    '[data-model], [data-testid*="model" i], [class*="model" i]'
+  const modelCandidates = document.querySelectorAll<HTMLElement>(
+    '[data-model], [data-testid*="model" i]',
   );
-  for (const el of candidates) {
+  for (const el of modelCandidates) {
     const text = (el.textContent ?? '').trim();
-    if (text && text.length < 80) return text;
+    if (text && text.length < 80) {
+      state.lastModel = text;
+      break;
+    }
   }
-  return null;
-}
-
-function readAgentFromHeader(): string | null {
-  const candidates = document.querySelectorAll<HTMLElement>(
-    '[data-agent], [data-testid*="agent" i]'
+  const agentCandidates = document.querySelectorAll<HTMLElement>(
+    '[data-agent], [data-testid*="agent" i]',
   );
-  for (const el of candidates) {
+  for (const el of agentCandidates) {
     const text = (el.textContent ?? '').trim();
-    if (text && text.length < 80) return text;
+    if (text && text.length < 80) {
+      state.lastAgent = text;
+      break;
+    }
   }
-  return null;
 }
 
 // ──── Visibility / focus suppression ───────────────────────────────────────
 
 function bindVisibilityEvents(): void {
   if (typeof document === 'undefined') return;
-  const onVis = () => { /* noop — read on demand */ };
+  const onVis = () => { /* noop */ };
   document.addEventListener('visibilitychange', onVis);
   state.unbinder.push(() => document.removeEventListener('visibilitychange', onVis));
   const onFocus = () => { /* noop */ };
@@ -392,7 +430,6 @@ async function completeRun(status: AgentRunStatus, durationMs: number): Promise<
   if (!shouldNotify(status)) return;
   if (config.suppressWhenFocused && pageIsFocused()) return;
 
-  // Cooldown — avoid rapid-fire notifications on tool-call loops.
   const now = Date.now();
   if (now - state.lastNotifiedAt < config.cooldownMs) return;
   state.lastNotifiedAt = now;
@@ -458,7 +495,6 @@ async function dispatch(payload: NotificationPayload): Promise<void> {
 
 async function deliverBrowser(payload: NotificationPayload): Promise<void> {
   if (state.permission === 'unsupported') {
-    // No Notification API — fall back to an in-page toast.
     showInPageToast(payload);
     return;
   }
@@ -491,7 +527,6 @@ async function deliverBrowser(payload: NotificationPayload): Promise<void> {
       n.close();
     };
   } catch (err) {
-    // Some browsers throw when called from a non-active tab.
     showInPageToast(payload, '系统通知失败，已改为页面内提示。');
     config.onError(toError(err), 'browser');
   }
@@ -567,30 +602,15 @@ function injectToastStyles(): void {
   cursor: pointer;
   transition: opacity .25s ease, transform .25s ease;
 }
-.dsh-reminder-toast-title {
-  font-weight: 600;
-  margin-bottom: 4px;
-  color: ${DSH_CSS_VARS.labelPrimary};
-}
-.dsh-reminder-toast-body {
-  color: ${DSH_CSS_VARS.labelSecondary};
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.dsh-reminder-toast-hint {
-  color: ${DSH_CSS_VARS.labelTertiary};
-  font-size: 12px;
-  margin-top: 6px;
-}
-.dsh-reminder-toast-leave {
-  opacity: 0;
-  transform: translateY(-4px);
-}
+.dsh-reminder-toast-title { font-weight: 600; margin-bottom: 4px; color: ${DSH_CSS_VARS.labelPrimary}; }
+.dsh-reminder-toast-body { color: ${DSH_CSS_VARS.labelSecondary}; white-space: pre-wrap; word-break: break-word; }
+.dsh-reminder-toast-hint { color: ${DSH_CSS_VARS.labelTertiary}; font-size: 12px; margin-top: 6px; }
+.dsh-reminder-toast-leave { opacity: 0; transform: translateY(-4px); }
 `;
   document.head.appendChild(style);
 }
 
-// ──── Generic fetch helper ─────────────────────────────────────────────────
+// ──── Generic fetch helpers ────────────────────────────────────────────────
 
 async function postJson(url: string, body: unknown): Promise<Response> {
   const res = await fetch(url, {
@@ -651,7 +671,6 @@ async function deliverBark(payload: NotificationPayload): Promise<void> {
   const cfg = config.providers;
   if (!cfg.barkKey) throw new Error('Bark provider requires barkKey');
   const server = (cfg.barkServer || 'https://api.day.app').replace(/\/$/, '');
-  // Bark accepts /:key/:title/:body?url=…&icon=…
   const url = `${server}/${encodeURIComponent(cfg.barkKey)}/${encodeURIComponent(
     payload.title,
   )}/${encodeURIComponent(payload.body)}${
@@ -739,6 +758,438 @@ async function deliverCustom(payload: NotificationPayload): Promise<void> {
 function toError(value: unknown): Error {
   if (value instanceof Error) return value;
   return new Error(typeof value === 'string' ? value : JSON.stringify(value));
+}
+
+// ──── Settings panel ───────────────────────────────────────────────────────
+
+const SETTINGS_STYLE_ID = 'dsh-completion-reminder-settings-style';
+
+function ensureSettingsButton(): void {
+  if (state.settingsButtonEl && document.body.contains(state.settingsButtonEl)) return;
+  injectSettingsStyles();
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'dsh-reminder-fab';
+  btn.setAttribute('aria-label', 'Completion Reminder Settings');
+  btn.title = 'Completion Reminder';
+  btn.innerHTML = `
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+      <path fill="currentColor" d="M12 2a7 7 0 0 0-7 7v3.586l-1.707 1.707A1 1 0 0 0 4 15.5h16a1 1 0 0 0 .707-1.707L19 12.586V9a7 7 0 0 0-7-7zm0 19a3 3 0 0 0 3-3H9a3 3 0 0 0 3 3z"/>
+    </svg>
+  `;
+  btn.addEventListener('click', () => toggleSettingsPanel());
+  document.body.appendChild(btn);
+  state.settingsButtonEl = btn;
+}
+
+function refreshSettingsButtonVisibility(): void {
+  if (config.showSettingsPanel) {
+    ensureSettingsButton();
+  } else if (state.settingsButtonEl) {
+    state.settingsButtonEl.remove();
+    state.settingsButtonEl = null;
+    removeSettingsPanel();
+  }
+}
+
+function removeSettingsUI(): void {
+  removeSettingsPanel();
+  if (state.settingsButtonEl) {
+    state.settingsButtonEl.remove();
+    state.settingsButtonEl = null;
+  }
+}
+
+function toggleSettingsPanel(): void {
+  if (state.panelOpen) removeSettingsPanel();
+  else openSettingsPanel();
+}
+
+function openSettingsPanel(): void {
+  if (state.settingsPanelEl) return;
+  injectSettingsStyles();
+  const panel = document.createElement('div');
+  panel.className = 'dsh-reminder-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', 'Completion Reminder Settings');
+  panel.innerHTML = renderSettingsPanel();
+  document.body.appendChild(panel);
+  state.settingsPanelEl = panel;
+  state.panelOpen = true;
+  wireSettingsPanel(panel);
+}
+
+function removeSettingsPanel(): void {
+  if (state.settingsPanelEl) {
+    state.settingsPanelEl.remove();
+    state.settingsPanelEl = null;
+  }
+  state.panelOpen = false;
+}
+
+function renderSettingsPanel(): string {
+  const providers: Array<[ProviderId, string]> = [
+    ['browser', '🌐 浏览器通知'],
+    ['telegram', '✈️ Telegram'],
+    ['bark', '🍎 Bark (iOS)'],
+    ['pushover', '📲 Pushover'],
+    ['serverchan', '🐦 Server酱'],
+    ['discord', '🎮 Discord'],
+    ['slack', '💼 Slack'],
+    ['webhook', '🔗 通用 Webhook'],
+    ['custom', '🛠 自定义'],
+  ];
+
+  const providerOptions = providers
+    .map(([id, name]) => `<option value="${id}" ${config.provider === id ? 'selected' : ''}>${name}</option>`)
+    .join('');
+
+  const p = config.providers;
+  const fields: Array<[string, string, string, string]> = [
+    ['telegramBotToken', 'Telegram Bot Token', 'bot123456:ABC…', p.telegramBotToken ?? ''],
+    ['telegramChatId',   'Telegram Chat ID',   '123456789', p.telegramChatId ?? ''],
+    ['barkKey',          'Bark Key',           '你的 iPhone Bark 设备 Key', p.barkKey ?? ''],
+    ['barkServer',       'Bark Server（可选）', '默认 https://api.day.app', p.barkServer ?? ''],
+    ['pushoverUserKey',  'Pushover User Key',  'u…', p.pushoverUserKey ?? ''],
+    ['pushoverToken',    'Pushover App Token', 'a…', p.pushoverToken ?? ''],
+    ['pushoverDevice',   'Pushover Device（可选）', '留空推送到所有设备', p.pushoverDevice ?? ''],
+    ['serverchanSendKey','Server酱 SendKey',   'SCT…', p.serverchanSendKey ?? ''],
+    ['discordWebhookUrl','Discord Webhook URL', 'https://discord.com/api/webhooks/…', p.discordWebhookUrl ?? ''],
+    ['slackWebhookUrl',  'Slack Webhook URL',  'https://hooks.slack.com/services/…', p.slackWebhookUrl ?? ''],
+    ['webhookUrl',       '通用 Webhook URL',   'https://your-service.example/notify', p.webhookUrl ?? ''],
+  ];
+
+  const providerFieldsHtml = fields
+    .map(
+      ([name, label, placeholder, value]) => `
+      <label class="dsh-reminder-field" data-provider-field>
+        <span>${label}</span>
+        <input type="text" name="${name}" data-provider-input="${name}" placeholder="${escapeAttr(placeholder)}" value="${escapeAttr(value)}" autocomplete="off" spellcheck="false" />
+      </label>`,
+    )
+    .join('');
+
+  const perm = state.permission;
+
+  return `
+    <header class="dsh-reminder-panel-header">
+      <strong>提醒设置</strong>
+      <button type="button" class="dsh-reminder-close" data-reminder-action="close" aria-label="关闭">✕</button>
+    </header>
+    <div class="dsh-reminder-panel-body">
+      <label class="dsh-reminder-field">
+        <span>通知渠道</span>
+        <select data-reminder-input="provider">${providerOptions}</select>
+      </label>
+
+      <fieldset class="dsh-reminder-group" data-reminder-group="provider-fields">
+        <legend>渠道凭证（仅当前渠道需要）</legend>
+        ${providerFieldsHtml}
+        <p class="dsh-reminder-hint">
+          配置只保存在本浏览器的 localStorage，
+          <strong>不会</strong> 上传到任何服务器。
+        </p>
+      </fieldset>
+
+      <fieldset class="dsh-reminder-group">
+        <legend>行为</legend>
+        <label class="dsh-reminder-row">
+          <input type="checkbox" data-reminder-input="notifyOnSuccess" ${config.notifyOnSuccess ? 'checked' : ''} />
+          <span>成功完成时通知</span>
+        </label>
+        <label class="dsh-reminder-row">
+          <input type="checkbox" data-reminder-input="notifyOnStopped" ${config.notifyOnStopped ? 'checked' : ''} />
+          <span>用户主动停止时通知</span>
+        </label>
+        <label class="dsh-reminder-row">
+          <input type="checkbox" data-reminder-input="notifyOnError" ${config.notifyOnError ? 'checked' : ''} />
+          <span>Agent 出错时通知</span>
+        </label>
+        <label class="dsh-reminder-row">
+          <input type="checkbox" data-reminder-input="suppressWhenFocused" ${config.suppressWhenFocused ? 'checked' : ''} />
+          <span>DSH 标签页可见时静默（推荐）</span>
+        </label>
+        <label class="dsh-reminder-row">
+          <input type="checkbox" data-reminder-input="autoRequestPermission" ${config.autoRequestPermission ? 'checked' : ''} />
+          <span>自动请求浏览器通知权限</span>
+        </label>
+        <label class="dsh-reminder-field">
+          <span>冷却（ms）— 防止连续完成时刷屏</span>
+          <input type="number" min="0" step="500" data-reminder-input="cooldownMs" value="${config.cooldownMs}" />
+        </label>
+      </fieldset>
+
+      <div class="dsh-reminder-row dsh-reminder-status">
+        <span>当前权限：<strong data-reminder-perm>${permissionLabel(perm)}</strong></span>
+        <button type="button" data-reminder-action="request-permission">请求权限</button>
+      </div>
+
+      <div class="dsh-reminder-actions">
+        <button type="button" class="primary" data-reminder-action="test">发送测试通知</button>
+        <button type="button" data-reminder-action="save">保存</button>
+        <button type="button" data-reminder-action="reset">重置</button>
+      </div>
+      <p class="dsh-reminder-hint" data-reminder-status></p>
+    </div>
+  `;
+}
+
+function wireSettingsPanel(panel: HTMLElement): void {
+  panel.querySelector('[data-reminder-action="close"]')
+    ?.addEventListener('click', () => removeSettingsPanel());
+
+  panel.addEventListener('change', (ev) => {
+    const target = ev.target as HTMLElement | null;
+    if (!target) return;
+    if (target instanceof HTMLSelectElement) {
+      const name = target.dataset.reminderInput;
+      if (name === 'provider') {
+        config.provider = target.value as ProviderId;
+      }
+    } else if (target instanceof HTMLInputElement) {
+      const name = target.dataset.reminderInput;
+      const value = target.type === 'checkbox' ? target.checked
+        : target.type === 'number' ? Number(target.value) || 0
+        : target.value;
+      if (name === 'notifyOnSuccess')       config.notifyOnSuccess = !!value;
+      else if (name === 'notifyOnStopped')  config.notifyOnStopped = !!value;
+      else if (name === 'notifyOnError')    config.notifyOnError = !!value;
+      else if (name === 'suppressWhenFocused') config.suppressWhenFocused = !!value;
+      else if (name === 'autoRequestPermission') config.autoRequestPermission = !!value;
+      else if (name === 'cooldownMs') config.cooldownMs = Number(value) || 0;
+    }
+    savePersisted();
+  });
+
+  panel.addEventListener('input', (ev) => {
+    const target = ev.target as HTMLInputElement | null;
+    if (!target) return;
+    const name = target.dataset.providerInput;
+    if (name) {
+      (config.providers as Record<string, string>)[name] = target.value;
+      savePersisted();
+    }
+  });
+
+  panel.querySelector('[data-reminder-action="save"]')
+    ?.addEventListener('click', () => {
+      savePersisted();
+      setStatus(panel, '已保存 ✓');
+    });
+
+  panel.querySelector('[data-reminder-action="reset"]')
+    ?.addEventListener('click', () => {
+      if (typeof localStorage !== 'undefined') {
+        try { localStorage.removeItem(STORAGE_KEY); } catch { /* noop */ }
+      }
+      configure();
+      removeSettingsPanel();
+      openSettingsPanel();
+    });
+
+  panel.querySelector('[data-reminder-action="request-permission"]')
+    ?.addEventListener('click', async () => {
+      const result = await requestBrowserPermission();
+      const permEl = panel.querySelector('[data-reminder-perm]');
+      if (permEl) permEl.textContent = permissionLabel(result);
+      setStatus(panel, result === 'granted' ? '权限已授予' : '权限状态：' + permissionLabel(result));
+    });
+
+  panel.querySelector('[data-reminder-action="test"]')
+    ?.addEventListener('click', async () => {
+      try {
+        const ctx: TitleContext = {
+          status: 'success',
+          durationMs: 4321,
+          completedAt: new Date().toISOString(),
+          url: typeof location !== 'undefined' ? location.href : '',
+        };
+        const payload: NotificationPayload = {
+          title: '🧪 DSH Completion Reminder — 测试',
+          body: `这是 ${config.provider} 渠道的测试通知。Agent 完成后将使用相同的方式推送。`,
+          url: ctx.url,
+          status: 'success',
+          durationMs: ctx.durationMs,
+          completedAt: ctx.completedAt,
+        };
+        await dispatch(payload);
+        config.onNotify(payload, config.provider);
+        setStatus(panel, '测试通知已发送，请查收。');
+      } catch (err) {
+        const e = toError(err);
+        config.onError(e, config.provider);
+        setStatus(panel, '测试失败：' + e.message, true);
+      }
+    });
+}
+
+function setStatus(panel: HTMLElement, text: string, isError = false): void {
+  const el = panel.querySelector('[data-reminder-status]');
+  if (!el) return;
+  el.textContent = text;
+  (el as HTMLElement).style.color = isError
+    ? 'var(--dsw-alias-state-error-primary)'
+    : 'var(--dsw-alias-state-success-primary)';
+  setTimeout(() => {
+    if (el.textContent === text) el.textContent = '';
+  }, 5000);
+}
+
+function permissionLabel(p: NotificationPermission | 'unsupported'): string {
+  if (p === 'granted') return '已授予';
+  if (p === 'denied') return '已拒绝';
+  if (p === 'unsupported') return '不支持';
+  return '未询问';
+}
+
+function escapeAttr(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function injectSettingsStyles(): void {
+  if (document.getElementById(SETTINGS_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = SETTINGS_STYLE_ID;
+  style.textContent = `
+.dsh-reminder-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 2147483600;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: ${DSH_CSS_VARS.buttonInfoFill};
+  color: #fff;
+  border: none;
+  box-shadow: ${DSH_CSS_VARS.shadowLv3};
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  opacity: 0.85;
+  transition: opacity .15s, transform .15s;
+}
+.dsh-reminder-fab:hover { opacity: 1; transform: scale(1.05); }
+
+.dsh-reminder-panel {
+  position: fixed;
+  right: 18px;
+  bottom: 70px;
+  z-index: 2147483601;
+  width: 360px;
+  max-height: min(80vh, 640px);
+  overflow: auto;
+  background: ${DSH_CSS_VARS.bgModule};
+  color: ${DSH_CSS_VARS.labelPrimary};
+  border: 1px solid ${DSH_CSS_VARS.borderL3};
+  border-radius: 12px;
+  box-shadow: ${DSH_CSS_VARS.shadowLv3};
+  font-size: 13px;
+  line-height: 1.45;
+  font-family: var(--dsw-font-family, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+}
+.dsh-reminder-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid ${DSH_CSS_VARS.borderL1};
+  font-size: 14px;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  background: ${DSH_CSS_VARS.bgModule};
+}
+.dsh-reminder-close {
+  background: transparent;
+  border: none;
+  color: ${DSH_CSS_VARS.labelSecondary};
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.dsh-reminder-close:hover { background: ${DSH_CSS_VARS.borderL1}; color: ${DSH_CSS_VARS.labelPrimary}; }
+
+.dsh-reminder-panel-body { padding: 12px 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+
+.dsh-reminder-group {
+  border: 1px solid ${DSH_CSS_VARS.borderL1};
+  border-radius: 8px;
+  padding: 8px 10px 10px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dsh-reminder-group > legend { padding: 0 4px; color: ${DSH_CSS_VARS.labelSecondary}; font-size: 12px; }
+
+.dsh-reminder-field { display: flex; flex-direction: column; gap: 4px; }
+.dsh-reminder-field > span { color: ${DSH_CSS_VARS.labelSecondary}; font-size: 12px; }
+.dsh-reminder-field input,
+.dsh-reminder-field select {
+  background: transparent;
+  color: ${DSH_CSS_VARS.labelPrimary};
+  border: 1px solid ${DSH_CSS_VARS.borderL2};
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color .15s, box-shadow .15s;
+}
+.dsh-reminder-field input:focus,
+.dsh-reminder-field select:focus {
+  border-color: ${DSH_CSS_VARS.stateBusinessPrimary};
+  box-shadow: 0 0 0 2px color-mix(in srgb, ${DSH_CSS_VARS.stateBusinessPrimary} 25%, transparent);
+}
+
+.dsh-reminder-row { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.dsh-reminder-row > input[type="checkbox"] { accent-color: ${DSH_CSS_VARS.buttonInfoFill}; }
+
+.dsh-reminder-actions { display: flex; gap: 8px; }
+.dsh-reminder-actions button {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid ${DSH_CSS_VARS.borderL2};
+  background: transparent;
+  color: ${DSH_CSS_VARS.labelPrimary};
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+}
+.dsh-reminder-actions button:hover { background: ${DSH_CSS_VARS.borderL1}; }
+.dsh-reminder-actions button.primary { background: ${DSH_CSS_VARS.buttonInfoFill}; color: #fff; border-color: transparent; }
+.dsh-reminder-actions button.primary:hover { filter: brightness(1.05); }
+
+.dsh-reminder-status {
+  padding: 6px 8px;
+  border: 1px dashed ${DSH_CSS_VARS.borderL2};
+  border-radius: 6px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.dsh-reminder-status button {
+  background: transparent;
+  color: ${DSH_CSS_VARS.labelPrimary};
+  border: 1px solid ${DSH_CSS_VARS.borderL2};
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+}
+.dsh-reminder-status button:hover { background: ${DSH_CSS_VARS.borderL1}; }
+
+.dsh-reminder-hint { color: ${DSH_CSS_VARS.labelTertiary}; font-size: 12px; line-height: 1.5; }
+`;
+  document.head.appendChild(style);
 }
 
 // ──── DSH client plugin entry ──────────────────────────────────────────────

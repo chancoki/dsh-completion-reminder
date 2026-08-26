@@ -156,6 +156,13 @@ export interface CompletionReminderOptions {
    * misconfiguration in the console without breaking the page.
    */
   onError?: (err: Error, provider: ProviderId) => void;
+
+  /**
+   * Whether to render the floating settings panel (🔔 gear button).
+   * Set to false when the user has already configured everything via API.
+   * @default true
+   */
+  showSettingsPanel?: boolean;
 }
 
 /**
@@ -209,6 +216,8 @@ export interface PluginState {
   isActive: boolean;
   permission: NotificationPermission | 'unsupported';
   unbinder: Array<() => void>;
+  settingsPanelEl: HTMLElement | null;
+  settingsButtonEl: HTMLElement | null;
 }
 
 /**
@@ -262,23 +271,33 @@ export const DEFAULT_OPTIONS: Required<
     return parts.join(' · ');
   },
   onNotify: () => undefined,
-  onError: (err) => console.warn('[dsh-completion-reminder]', err),
+  onError: (err) => {
+    try { console.warn('[dsh-completion-reminder]', err); } catch { /* noop */ }
+  },
   providers: {},
   clickUrl: '',
   iconUrl: '',
+  showSettingsPanel: true,
 };
 
 /** DSH design system CSS variable names. */
 export const DSH_CSS_VARS = {
   bgModule: 'var(--dsw-alias-bg-module-platform)',
+  borderL1: 'var(--dsw-alias-border-l1)',
+  borderL2: 'var(--dsw-alias-border-l2)',
   borderL3: 'var(--dsw-alias-border-l3)',
   labelPrimary: 'var(--dsw-alias-label-primary)',
   labelSecondary: 'var(--dsw-alias-label-secondary)',
   labelTertiary: 'var(--dsw-alias-label-tertiary)',
+  labelCaption: 'var(--dsw-alias-label-caption)',
   stateSuccessPrimary: 'var(--dsw-alias-state-success-primary)',
   stateWarnPrimary: 'var(--dsw-alias-state-warn-primary)',
   stateErrorPrimary: 'var(--dsw-alias-state-error-primary)',
+  stateBusinessPrimary: 'var(--dsw-alias-state-business-primary)',
+  buttonInfoFill: 'var(--dsw-alias-button-info-fill)',
   shadowLv3: 'var(--dsw-shadow-lv3)',
+  fontStrong14: 'var(--dsw-font-s-strong-14)',
+  fontXs13: 'var(--dsw-font-xs-13)',
 };
 
 /**
@@ -293,4 +312,22 @@ export function formatDuration(ms: number): string {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+/** localStorage key for the persisted user config. */
+export const STORAGE_KEY = 'dsh-completion-reminder:config:v1';
+
+/**
+ * Public shape of the persisted user config (subset of CompletionReminderOptions).
+ */
+export interface PersistedConfig {
+  provider?: ProviderId;
+  autoRequestPermission?: boolean;
+  notifyOnSuccess?: boolean;
+  notifyOnStopped?: boolean;
+  notifyOnError?: boolean;
+  suppressWhenFocused?: boolean;
+  cooldownMs?: number;
+  showSettingsPanel?: boolean;
+  providers?: ProviderConfig;
 }
