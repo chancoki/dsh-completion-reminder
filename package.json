@@ -1,0 +1,68 @@
+{
+  "name": "dsh-completion-reminder",
+  "version": "1.0.0",
+  "description": "DSH client plugin — notify the user when an agent finishes (browser notification by default, with optional popular third-party providers).",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "scripts": {
+    "clean": "node scripts/clean.js",
+    "build": "npm run clean && npm run build:tsc && npm run build:bundle",
+    "build:tsc": "tsc",
+    "build:bundle": "node scripts/build-plugin.js",
+    "dev": "node scripts/build-plugin.js --watch",
+    "test": "echo \"Open test.html in a browser to verify the plugin\" && exit 0",
+    "serve": "npx serve example"
+  },
+  "keywords": [
+    "dsh",
+    "plugin",
+    "deepseek",
+    "harness",
+    "agent",
+    "completion",
+    "notification",
+    "reminder",
+    "browser-notification"
+  ],
+  "author": "chancoki <chhj727@163.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "files": [
+    "lib",
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "install.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chancoki/dsh-completion-reminder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chancoki/dsh-completion-reminder/issues"
+  }
+}

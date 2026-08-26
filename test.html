@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>DSH Completion Reminder — Test Harness</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 920px;
+      margin: 24px auto;
+      padding: 24px;
+      background: #fafafa;
+      color: #222;
+    }
+    h1 { margin-top: 0; }
+    .panel {
+      background: #fff;
+      border: 1px solid #e3e3e3;
+      border-radius: 10px;
+      padding: 16px 18px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.04);
+    }
+    pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px; overflow:auto; }
+    .toolbar { display:flex; gap:8px; align-items:center; }
+    .toolbar input[type=text] { flex:1; }
+    button {
+      padding: 8px 14px; border: 1px solid #d4d4d4; background:#f5f5f5; border-radius:6px; cursor:pointer;
+    }
+    button.primary { background:#2563eb; color:#fff; border-color:#1d4ed8; }
+    .status { display:inline-block; padding:2px 8px; border-radius:4px; font-size:12px; }
+    .status.running { background:#dcfce7; color:#15803d; }
+    .status.idle { background:#e0e7ff; color:#3730a3; }
+    .chat { max-height: 240px; overflow:auto; border:1px dashed #d4d4d4; padding:8px; border-radius:6px; background:#f8fafc; }
+    .chat p { margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <h1>DSH Completion Reminder — Test Harness</h1>
+
+  <div class="panel">
+    <p>
+      This page simulates a DSH chat toolbar. Click <b>Start Run</b> to switch the
+      send button into a stop button; click <b>Stop</b> to end the run. The
+      completion-reminder plugin should fire a notification.
+    </p>
+    <div class="toolbar">
+      <input id="composer" type="text" placeholder="Type a message…" />
+      <button id="run" class="primary">Send</button>
+    </div>
+    <p style="margin-top:8px">State: <span id="state" class="status idle">idle</span></p>
+  </div>
+
+  <div class="panel">
+    <h2>Plugin log</h2>
+    <pre id="log">(no notifications yet)</pre>
+  </div>
+
+  <div class="panel">
+    <h2>Sample configuration</h2>
+    <pre id="snippet"></pre>
+  </div>
+
+  <div id="conversation" class="chat" data-conversation-id="demo"></div>
+
+  <script src="./dist/dsh-completion-reminder.js"></script>
+  <script>
+    const runBtn = document.getElementById('run');
+    const state = document.getElementById('state');
+    const log = document.getElementById('log');
+    const composer = document.getElementById('composer');
+    const conversation = document.getElementById('conversation');
+
+    let running = false;
+
+    function setRunning(v) {
+      running = v;
+      runBtn.textContent = v ? 'Stop' : 'Send';
+      runBtn.classList.toggle('primary', !v);
+      state.textContent = v ? 'running' : 'idle';
+      state.classList.toggle('running', v);
+      state.classList.toggle('idle', !v);
+    }
+
+    runBtn.addEventListener('click', () => {
+      if (running) {
+        setRunning(false);
+        // Append an assistant message to influence status detection.
+        const p = document.createElement('p');
+        p.setAttribute('data-role', 'assistant');
+        p.textContent = 'Run stopped by user.';
+        conversation.appendChild(p);
+      } else {
+        setRunning(true);
+      }
+    });
+
+    document.getElementById('snippet').textContent = `DSHCompletionReminder.configure({
+  provider: 'browser',         // or 'telegram' / 'bark' / 'pushover' / 'serverchan' / 'discord' / 'slack' / 'webhook' / 'custom'
+  autoRequestPermission: true,
+  suppressWhenFocused: false,  // fire even while this tab is focused — useful for tests
+  onNotify: (payload, provider) => log(JSON.stringify({ provider, payload })),
+});
+DSHCompletionReminder.activate();`;
+
+    window.DSHCompletionReminder.configure({
+      suppressWhenFocused: false,
+      cooldownMs: 0,
+      onNotify: (payload, provider) => {
+        log.textContent = `[${new Date().toLocaleTimeString()}] ${provider}\n` + JSON.stringify(payload, null, 2) + '\n\n' + log.textContent;
+      },
+      onError: (err) => {
+        log.textContent = `[${new Date().toLocaleTimeString()}] ERROR ${err.message}\n\n` + log.textContent;
+      },
+    });
+    window.DSHCompletionReminder.activate();
+  </script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# dsh-completion-reminder bundle patch: one insert row for the node half.
+# The node half is a pure carrier (empty apply) that lets the Loader mount the
+# package; the browser half ships via exports["./client"] and is discovered
+# through the package.json dsh.client declaration.
+- insert:
+    - id: dsh-completion-reminder
+      name: 'dsh-completion-reminder'
