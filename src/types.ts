@@ -69,6 +69,12 @@ export interface ProviderConfig {
   /** 企业微信群机器人 Webhook（含 key 参数的完整 URL） */
   wecomWebhookUrl?: string;
 
+  /**
+   * 本地转发服务地址（钉钉/企业微信直连被 CORS 阻断时使用）。
+   * 指向随插件附带的 relay.mjs，例如 http://127.0.0.1:8765。
+   */
+  relayUrl?: string;
+
   /** Discord incoming webhook URL */
   discordWebhookUrl?: string;
   /** Slack incoming webhook URL */
