@@ -80,6 +80,7 @@ const state: {
 
 const COMPOSER_CARD_SELECTOR = '[data-composer-card]';
 const CONVERSATION_ROOT_SELECTOR = '[data-conversation-scroll], [data-composer-seat]';
+const ASSISTANT_SELECTOR = '[data-role="assistant"], [data-author="assistant"], [data-author="model"]';
 
 const RUNNING_TOKENS = [
   'stop generating', '停止生成', '停止', 'stop',
@@ -244,8 +245,39 @@ function handleMutations(mutations: MutationRecord[]): void {
       ) {
         evaluateNow();
       }
+      // 兜底：若主检测（按钮 aria-label 切换）因 DSH 改版失效，
+      // 用「新出现的 assistant 消息」作为完成信号。
+      if (node.matches?.(ASSISTANT_SELECTOR)) {
+        maybeFallbackComplete(node);
+      }
     }
   }
+}
+
+const seenAssistantNodes = new WeakSet<HTMLElement>();
+
+/**
+ * 兜底完成检测：主逻辑依赖 composer 按钮在「停止生成 / 发送消息」间切换。
+ * 一旦该 DOM 契约变化，主逻辑会静默失效。这里把「新出现的 assistant 消息节点」
+ * 当作完成信号，但务必克制——避免与正常路径重复触发、避免流式追加时误报。
+ */
+function maybeFallbackComplete(node: HTMLElement): void {
+  if (seenAssistantNodes.has(node)) return;
+  seenAssistantNodes.add(node);
+  // 等流式输出/结算平息后再判断，避免消息尚在生成就通知。
+  setTimeout(() => {
+    if (!state.isActive) return;
+    const primary = findPrimaryButton();
+    const stillRunning = primary && isRunningButton(primary);
+    if (stillRunning) return; // 还在跑，交给主逻辑收尾
+    // 距上次通知未满冷却则不抢主逻辑的风头（正常路径会先到）。
+    const sinceLast = Date.now() - state.lastNotifiedAt;
+    if (sinceLast < Math.max(2000, config.cooldownMs)) return;
+    if (state.inFlight) state.inFlight = false;
+    const startedAt = state.runStartedAt ?? Date.now();
+    state.runStartedAt = null;
+    void completeRun(determineStatus(), Date.now() - startedAt);
+  }, 1500);
 }
 
 function isInsideComposer(el: Element): boolean {
@@ -496,9 +528,11 @@ async function deliverBrowser(payload: NotificationPayload): Promise<void> {
     });
     n.onclick = () => {
       try {
-        if (typeof window !== 'undefined' && payload.url) {
+        if (typeof window !== 'undefined') {
           window.focus();
-          window.open(payload.url, '_self');
+          // 跳转到配置里的「点击链接」（默认是当前 DSH 会话），
+          // 用新标签页打开，保持 DSH 本身不被覆盖。
+          if (payload.url) window.open(payload.url, '_blank');
         }
       } catch { /* noop */ }
       n.close();
@@ -724,24 +758,29 @@ async function deliverFeishu(payload: NotificationPayload): Promise<void> {
   const url0 = (cfg.feishuWebhookUrl ?? '').trim();
   if (!url0) throw new Error('飞书渠道需要填写机器人 Webhook 地址');
   const secret = (cfg.feishuSecret ?? '').trim();
-  const ts = Math.floor(Date.now() / 1000);
-  const body: Record<string, unknown> = {
-    msg_type: 'text',
-    content: { text: `${payload.title}\n${payload.body}${payload.url ? `\n${payload.url}` : ''}` },
-  };
+  // 飞书签名校验：签名放 URL 查询参数；sign = base64(HMAC-SHA256(key=secret, msg=`${ts}\n${secret}`))
+  let url = url0;
   if (secret) {
-    // 飞书签名校验：key = `${ts}\n${secret}`，message 为空串，base64 输出
-    body.timestamp = ts;
-    body.sign = await hmacSha256Base64(`${ts}\n${secret}`, '');
+    const ts = Math.floor(Date.now() / 1000);
+    const sign = await hmacSha256Base64(secret, `${ts}\n${secret}`);
+    url += (url.includes('?') ? '&' : '?') + `timestamp=${ts}&sign=${encodeURIComponent(sign)}`;
   }
-  await postJsonCors(url0, body);
+  // 富文本卡片（post）：标题 + 正文 + 可点击的「打开 DSH」链接
+  const content: unknown[][] = [
+    [{ tag: 'text', text: payload.body || '代理任务已结束，点击查看详情。' }],
+  ];
+  if (payload.url) content.push([{ tag: 'a', text: '打开 DSH', href: payload.url }]);
+  await postJsonCors(url, {
+    msg_type: 'post',
+    content: { post: { zh_cn: { title: payload.title, content } } },
+  });
 }
 
 async function deliverDiscord(payload: NotificationPayload): Promise<void> {
   const cfg = config.providers;
   if (!cfg.discordWebhookUrl) throw new Error('Discord provider requires discordWebhookUrl');
   await postJson(cfg.discordWebhookUrl, {
-    content: `**${payload.title}**\n${payload.body}${payload.url ? `\n${payload.url}` : ''}`,
+    content: `**${payload.title}**\n${payload.body}${payload.url ? `\n[打开 DSH](${payload.url})` : ''}`,
     username: 'DSH Reminder',
   });
 }
@@ -1157,7 +1196,7 @@ function buildPanelHtml(): string {
 function storageFooterText(): string {
   const st = storageStatus();
   const base = '配置只保存在本浏览器，不会上传任何服务器。';
-  if (!st.ok) return `${base} ⚠️ ${st.detail}`;
+  if (!st.ok) return `${base}（警告：${st.detail}）`;
   return `${base} 当前站点：${st.detail}（注意：localhost 和 127.0.0.1 算不同站点，配置互不相通）`;
 }
 

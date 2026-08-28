@@ -260,11 +260,11 @@ export const DEFAULT_OPTIONS: Required<
   titleTemplate: (ctx) => {
     switch (ctx.status) {
       case 'success':
-        return '✅ DSH Agent 已完成';
+        return 'DSH Agent 已完成';
       case 'stopped':
-        return '⏹ DSH Agent 已停止';
+        return 'DSH Agent 已停止';
       case 'error':
-        return '⚠️ DSH Agent 出错';
+        return 'DSH Agent 出错';
     }
   },
   bodyTemplate: (ctx) => {
